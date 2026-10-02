@@ -491,6 +491,33 @@ fn legacy(
         return;
     }
 
+    // A caller that supplies the alternate keys (the C API) can send a
+    // shifted key without text. Shift alone then produces the shifted key
+    // if it was given, else the uppercase of an ASCII letter. No other
+    // layout is guessed: any other key produces nothing. With ctrl or alt
+    // held, the rules for those apply to the base character instead.
+    if (utf8.len == 0 and
+        all_mods.shift and
+        !all_mods.ctrl and
+        !all_mods.alt and
+        event.alternates == .provided)
+    {
+        const cp: u21 = cp: {
+            const provided = event.alternates.provided;
+            if (provided.shifted != 0) break :cp provided.shifted;
+            if (event.unshifted_codepoint >= 'a' and event.unshifted_codepoint <= 'z') {
+                break :cp event.unshifted_codepoint - ('a' - 'A');
+            }
+            return;
+        };
+
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &buf) catch return;
+        var with_text = event;
+        with_text.utf8 = buf[0..len];
+        return try legacy(writer, with_text, opts);
+    }
+
     // If we have no UTF8 text then the only possibility is the
     // alt-prefix handling of unshifted codepoints... so we process that.
     if (utf8.len == 0) {
@@ -2872,13 +2899,21 @@ test "ctrlseq: right ctrl c" {
     try testing.expectEqual(@as(u8, 0x03), seq.?);
 }
 
+/// Compare an encoded key with the sequence that the structured kitty
+/// encoder writes for the fields that the event should map to.
+fn expectKittySequence(expected: KittySequence, actual: []const u8) !void {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try expected.encode(&writer);
+    try testing.expectEqualSlices(u8, writer.buffered(), actual);
+}
+
 test "kitty: hyper and meta modifiers" {
-    // Kitty modifier bits: hyper is 16 and meta is 32, and the sequence adds 1.
-    const cases = [_]struct { mods: key.Mods, expected: []const u8 }{
-        .{ .mods = .{ .hyper = true }, .expected = "[97;17u" },
-        .{ .mods = .{ .meta = true }, .expected = "[97;33u" },
-        .{ .mods = .{ .hyper = true, .meta = true }, .expected = "[97;49u" },
-        .{ .mods = .{ .hyper = true, .shift = true }, .expected = "[97;18u" },
+    const cases = [_]struct { mods: key.Mods, expected: KittyMods }{
+        .{ .mods = .{ .hyper = true }, .expected = .{ .hyper = true } },
+        .{ .mods = .{ .meta = true }, .expected = .{ .meta = true } },
+        .{ .mods = .{ .hyper = true, .meta = true }, .expected = .{ .hyper = true, .meta = true } },
+        .{ .mods = .{ .hyper = true, .shift = true }, .expected = .{ .hyper = true, .shift = true } },
     };
     for (cases) |case| {
         var buf: [128]u8 = undefined;
@@ -2889,7 +2924,10 @@ test "kitty: hyper and meta modifiers" {
             .utf8 = "a",
             .unshifted_codepoint = 'a',
         }, .{ .kitty_flags = .{ .disambiguate = true } });
-        try testing.expectEqualStrings(case.expected, writer.buffered()[1..]);
+        try expectKittySequence(
+            .{ .key = 'a', .final = 'u', .mods = case.expected },
+            writer.buffered(),
+        );
     }
 }
 
@@ -2899,7 +2937,10 @@ test "kitty: hyper or meta stops plain text and bare enter" {
     try kitty(&writer, .{ .key = .enter, .mods = .{ .hyper = true }, .utf8 = "" }, .{
         .kitty_flags = .{ .disambiguate = true },
     });
-    try testing.expectEqualStrings("[13;17u", writer.buffered()[1..]);
+    try expectKittySequence(
+        .{ .key = 13, .final = 'u', .mods = .{ .hyper = true } },
+        writer.buffered(),
+    );
 }
 
 test "kitty: provided alternate keys are reported exactly and never derived" {
@@ -2916,7 +2957,12 @@ test "kitty: provided alternate keys are reported exactly and never derived" {
             .unshifted_codepoint = 'a',
             .alternates = .{ .provided = .{ .shifted = 'A', .base_layout = 'q' } },
         }, .{ .kitty_flags = flags });
-        try testing.expectEqualStrings("[97:65:113;2u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .shift = true },
+            .alternates = .{ 'A', 'q' },
+        }, writer.buffered());
     }
 
     // Only the base layout key: the shifted slot stays empty.
@@ -2930,7 +2976,12 @@ test "kitty: provided alternate keys are reported exactly and never derived" {
             .unshifted_codepoint = 'a',
             .alternates = .{ .provided = .{ .base_layout = 'q' } },
         }, .{ .kitty_flags = flags });
-        try testing.expectEqualStrings("[97::113;5u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .ctrl = true },
+            .alternates = .{ null, 'q' },
+        }, writer.buffered());
     }
 
     // Nothing supplied: nothing is reported, although utf8 and the key
@@ -2945,7 +2996,11 @@ test "kitty: provided alternate keys are reported exactly and never derived" {
             .unshifted_codepoint = 'a',
             .alternates = .{ .provided = .{} },
         }, .{ .kitty_flags = flags });
-        try testing.expectEqualStrings("[97;2u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .shift = true },
+        }, writer.buffered());
     }
 
     // The derived mode still reports the shifted key from utf8.
@@ -2958,7 +3013,12 @@ test "kitty: provided alternate keys are reported exactly and never derived" {
             .utf8 = "A",
             .unshifted_codepoint = 'a',
         }, .{ .kitty_flags = flags });
-        try testing.expectEqualStrings("[97:65;2u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .shift = true },
+            .alternates = .{ 'A', null },
+        }, writer.buffered());
     }
 }
 
@@ -2978,7 +3038,11 @@ test "kitty: associated text needs report all and report associated" {
             .disambiguate = true,
             .report_associated = true,
         } });
-        try testing.expectEqualStrings("[97;2u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .shift = true },
+        }, writer.buffered());
     }
 
     // Flags 8 and 16: associated text.
@@ -2990,7 +3054,12 @@ test "kitty: associated text needs report all and report associated" {
             .report_all = true,
             .report_associated = true,
         } });
-        try testing.expectEqualStrings("[97;2;65u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .shift = true },
+            .text = "A",
+        }, writer.buffered());
     }
 }
 
@@ -3013,39 +3082,128 @@ test "kitty: text with a control codepoint is left out as a whole" {
             .utf8 = text,
             .unshifted_codepoint = 'a',
         }, .{ .kitty_flags = flags });
-        try testing.expectEqualStrings("[97;2u", writer.buffered()[1..]);
+        try expectKittySequence(.{
+            .key = 'a',
+            .final = 'u',
+            .mods = .{ .shift = true },
+        }, writer.buffered());
     }
 
-    // The same text is still the legacy text: it is not erased from utf8.
-    {
+    // The text is not erased from utf8: legacy encoding of the same event
+    // still writes the whole text, control codepoints included.
+    for (texts) |text| {
         var buf: [128]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         try legacy(&writer, .{
             .key = .key_a,
-            .utf8 = "a",
+            .utf8 = text,
             .unshifted_codepoint = 'a',
         }, .{});
-        try testing.expectEqualStrings("a", writer.buffered());
+        try testing.expectEqualSlices(u8, text, writer.buffered());
     }
 }
 
-test "kitty: function keys f26 to f35" {
-    const cases = [_]struct { k: key.Key, expected: []const u8 }{
-        .{ .k = .f26, .expected = "[57389u" },
-        .{ .k = .f27, .expected = "[57390u" },
-        .{ .k = .f28, .expected = "[57391u" },
-        .{ .k = .f29, .expected = "[57392u" },
-        .{ .k = .f30, .expected = "[57393u" },
-        .{ .k = .f31, .expected = "[57394u" },
-        .{ .k = .f32, .expected = "[57395u" },
-        .{ .k = .f33, .expected = "[57396u" },
-        .{ .k = .f34, .expected = "[57397u" },
-        .{ .k = .f35, .expected = "[57398u" },
-    };
-    for (cases) |case| {
+test "kitty: function keys f26 to f35 continue the f25 code points" {
+    // The kitty functional keys F13 to F35 are consecutive code points.
+    const f25 = for (kitty_entries) |entry| {
+        if (entry.key == .f25) break entry.code;
+    } else unreachable;
+
+    const keys = [_]key.Key{ .f26, .f27, .f28, .f29, .f30, .f31, .f32, .f33, .f34, .f35 };
+    for (keys, 1..) |k, offset| {
         var buf: [128]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
-        try kitty(&writer, .{ .key = case.k }, .{ .kitty_flags = .{ .disambiguate = true } });
-        try testing.expectEqualStrings(case.expected, writer.buffered()[1..]);
+        try kitty(&writer, .{ .key = k }, .{ .kitty_flags = .{ .disambiguate = true } });
+        try expectKittySequence(
+            .{ .key = f25 + @as(u21, @intCast(offset)), .final = 'u' },
+            writer.buffered(),
+        );
+    }
+}
+
+test "legacy: shift with no text produces the supplied shifted key" {
+    const cases = [_]struct { unshifted: u21, shifted: u21 }{
+        .{ .unshifted = 'a', .shifted = 'A' },
+        .{ .unshifted = '1', .shifted = '!' },
+        // A layout that is not US: the shifted key comes only from the caller.
+        .{ .unshifted = 0xE9, .shifted = 0xC9 },
+        .{ .unshifted = ';', .shifted = ':' },
+    };
+    for (cases) |case| {
+        var expected: [4]u8 = undefined;
+        const expected_len = try std.unicode.utf8Encode(case.shifted, &expected);
+
+        var buf: [16]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .key_a,
+            .mods = .{ .shift = true },
+            .utf8 = "",
+            .unshifted_codepoint = case.unshifted,
+            .alternates = .{ .provided = .{ .shifted = case.shifted } },
+        }, .{});
+        try testing.expectEqualSlices(u8, expected[0..expected_len], writer.buffered());
+    }
+}
+
+test "legacy: shift with no text and no shifted key uppercases ASCII letters only" {
+    // a to z become A to Z.
+    var letter: u21 = 'a';
+    while (letter <= 'z') : (letter += 1) {
+        var buf: [16]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .key_a,
+            .mods = .{ .shift = true },
+            .utf8 = "",
+            .unshifted_codepoint = letter,
+            .alternates = .{ .provided = .{} },
+        }, .{});
+        try testing.expectEqual(@as(usize, 1), writer.buffered().len);
+        try testing.expectEqual(std.ascii.toUpper(@intCast(letter)), writer.buffered()[0]);
+    }
+
+    // No layout is guessed for anything else: nothing is written.
+    const others = [_]u21{ '1', ';', '[', 0xE9, 0x3B1, 0 };
+    for (others) |cp| {
+        var buf: [16]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .key_a,
+            .mods = .{ .shift = true },
+            .utf8 = "",
+            .unshifted_codepoint = cp,
+            .alternates = .{ .provided = .{} },
+        }, .{});
+        try testing.expectEqual(@as(usize, 0), writer.buffered().len);
+    }
+}
+
+test "legacy: shift with no text keeps the alt and derive behavior" {
+    // With alt held, the alt rule applies to the base character.
+    {
+        var buf: [16]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .key_a,
+            .mods = .{ .shift = true, .alt = true },
+            .utf8 = "",
+            .unshifted_codepoint = 'a',
+            .alternates = .{ .provided = .{ .shifted = 'A' } },
+        }, .{ .alt_esc_prefix = true, .macos_option_as_alt = .true });
+        try testing.expectEqualSlices(u8, &[_]u8{ 0x1B, 'a' }, writer.buffered());
+    }
+
+    // Events that do not supply alternates are not changed.
+    {
+        var buf: [16]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .key_a,
+            .mods = .{ .shift = true },
+            .utf8 = "",
+            .unshifted_codepoint = 'a',
+        }, .{});
+        try testing.expectEqual(@as(usize, 0), writer.buffered().len);
     }
 }
