@@ -1216,8 +1216,13 @@ pub fn vt_write_until_query(
         // right after, so the reported bytes are the whole sequence.
         const st = c == 0x1b and i + 1 < input.len and input[i + 1] == '\\' and
             stringState(old);
+
+        // Bytes 0x80 to 0xFF are payload inside OSC and DCS strings, but a
+        // C1 introducer ends an APC string and starts a new sequence
+        // (parse_table.zig). It is not a byte of the APC.
+        const c1_in_apc = c1Introducer(c) and old == .sos_pm_apc_string;
         raw.active = true;
-        raw.append(alloc, c);
+        if (!c1_in_apc) raw.append(alloc, c);
         if (st) raw.append(alloc, '\\');
         stream.next(c);
         i += 1;
@@ -1230,7 +1235,12 @@ pub fn vt_write_until_query(
         // begins the next sequence. A C1 introducer that moved the parser
         // into a new sequence starts a new run too. The effect already ran.
         const after = stream.parser.state;
-        if ((c == 0x1b and stringState(old) and !st and after == .escape) or
+        if (c1_in_apc) {
+            // The introducer started a new sequence, unless the parser stayed
+            // in the same string, where the byte is payload.
+            if (after != old and entryState(after)) raw.clear();
+            raw.append(alloc, c);
+        } else if ((c == 0x1b and stringState(old) and !st and after == .escape) or
             (c1Introducer(c) and entryState(after) and !stringState(old)))
         {
             raw.clear();
@@ -7682,4 +7692,42 @@ test "vt_write_until_query keeps a C1 byte inside a string sequence as payload" 
     );
     try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
     try testing.expectEqualSlices(u8, csi, QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query starts a new request at a C1 introducer that ends an APC" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // Unlike OSC and DCS, an APC string ends at a C1 introducer. The CSI
+    // that the introducer starts is the query, and the APC bytes are not
+    // part of its request.
+    const first = "\x1b_Gpayload";
+    const second = "\x9b5n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.no_value,
+        vt_write_until_query(t, first.ptr, first.len, &consumed),
+    );
+    try testing.expectEqual(first.len, consumed);
+    try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, second.ptr, second.len, &consumed),
+    );
+    try testing.expectEqual(second.len, consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expect(QueryProbe.available);
+    try testing.expectEqualSlices(u8, second, QueryProbe.raw[0..QueryProbe.raw_len]);
+
+    // The same input in one call.
+    QueryProbe.reset();
+    const whole = first ++ second;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, whole.ptr, whole.len, &consumed),
+    );
+    try testing.expectEqual(whole.len, consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expectEqualSlices(u8, second, QueryProbe.raw[0..QueryProbe.raw_len]);
 }
