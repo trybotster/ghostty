@@ -64,6 +64,11 @@ pub const Command = union(Key) {
         kind: u8,
         data: [:0]const u8,
         terminator: Terminator = .st,
+
+        /// The selection exactly as the program wrote it: empty when the
+        /// program left it out, else the selection character. `kind` is that
+        /// character, or 'c' when it was left out.
+        selection: []const u8 = "",
     },
 
     /// OSC 7. Reports the current working directory of the shell. This is
