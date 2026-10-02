@@ -436,6 +436,9 @@ pub const Action = union(Key) {
         data: []const u8,
         terminator: osc.Terminator,
 
+        /// The selection as the program wrote it (empty when left out).
+        selection: []const u8 = "",
+
         pub const C = extern struct {
             kind: u8,
             data: lib.String,
@@ -2687,6 +2690,7 @@ pub fn Stream(comptime H: type) type {
                         .kind = clip.kind,
                         .data = clip.data,
                         .terminator = clip.terminator,
+                        .selection = clip.selection,
                     });
                 },
 
