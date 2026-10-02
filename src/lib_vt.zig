@@ -236,6 +236,9 @@ comptime {
             @export(&c.mouse_event_get_mods, .{ .name = "ghostty_mouse_event_get_mods" });
             @export(&c.mouse_event_set_position, .{ .name = "ghostty_mouse_event_set_position" });
             @export(&c.mouse_event_get_position, .{ .name = "ghostty_mouse_event_get_position" });
+            @export(&c.mouse_event_set_cell, .{ .name = "ghostty_mouse_event_set_cell" });
+            @export(&c.mouse_event_clear_cell, .{ .name = "ghostty_mouse_event_clear_cell" });
+            @export(&c.mouse_event_get_cell, .{ .name = "ghostty_mouse_event_get_cell" });
             @export(&c.mouse_encoder_new, .{ .name = "ghostty_mouse_encoder_new" });
             @export(&c.mouse_encoder_free, .{ .name = "ghostty_mouse_encoder_free" });
             @export(&c.mouse_encoder_setopt, .{ .name = "ghostty_mouse_encoder_setopt" });

@@ -71,6 +71,19 @@ typedef struct {
 } GhosttyMousePosition;
 
 /**
+ * A zero-based terminal cell.
+ *
+ * @ingroup mouse
+ */
+typedef struct {
+  /** Column, counted from the left of the terminal. */
+  uint32_t col;
+
+  /** Row, counted from the top of the terminal. */
+  uint32_t row;
+} GhosttyMouseCell;
+
+/**
  * Create a new mouse event instance.
  *
  * @param allocator Pointer to allocator, or NULL to use the default allocator
@@ -191,5 +204,46 @@ GHOSTTY_API void ghostty_mouse_event_set_position(GhosttyMouseEvent event,
  * @ingroup mouse
  */
 GHOSTTY_API GhosttyMousePosition ghostty_mouse_event_get_position(GhosttyMouseEvent event);
+
+/**
+ * Set the zero-based cell of the event.
+ *
+ * Use this when the cell is already known. The encoder reports the cell
+ * exactly as given for the cell formats (X10, UTF-8, SGR, URXVT): it is not
+ * converted from the pixel position, it is not clamped to the grid, and the
+ * position is not tested against the viewport, so an event outside the grid
+ * is reported at the cell that was given. A cell that the active format
+ * cannot express (X10 above 222, UTF-8 above 2014) produces no output.
+ *
+ * SGR pixel reporting ignores the cell and uses the position.
+ *
+ * @param event The event handle, must not be NULL
+ * @param cell The cell
+ *
+ * @ingroup mouse
+ */
+GHOSTTY_API void ghostty_mouse_event_set_cell(GhosttyMouseEvent event,
+                                              GhosttyMouseCell cell);
+
+/**
+ * Clear the cell. The encoder then converts the pixel position to a cell.
+ *
+ * @param event The event handle, must not be NULL
+ *
+ * @ingroup mouse
+ */
+GHOSTTY_API void ghostty_mouse_event_clear_cell(GhosttyMouseEvent event);
+
+/**
+ * Get the cell of the event.
+ *
+ * @param event The event handle, must not be NULL
+ * @param[out] out_cell Receives the cell when one is set (may be NULL)
+ * @return true if a cell is set, false otherwise
+ *
+ * @ingroup mouse
+ */
+GHOSTTY_API bool ghostty_mouse_event_get_cell(GhosttyMouseEvent event,
+                                              GhosttyMouseCell* out_cell);
 
 #endif /* GHOSTTY_VT_MOUSE_EVENT_H */
