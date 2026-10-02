@@ -163,6 +163,7 @@ extern "C" {
 #include <ghostty/vt/mouse.h>
 #include <ghostty/vt/paste.h>
 #include <ghostty/vt/point.h>
+#include <ghostty/vt/query_reply.h>
 #include <ghostty/vt/screen.h>
 #include <ghostty/vt/search.h>
 #include <ghostty/vt/selection.h>

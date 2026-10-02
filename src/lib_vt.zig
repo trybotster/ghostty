@@ -222,6 +222,7 @@ comptime {
             @export(&c.paste_is_safe, .{ .name = "ghostty_paste_is_safe" });
             @export(&c.paste_encode, .{ .name = "ghostty_paste_encode" });
             @export(&c.paste_frame, .{ .name = "ghostty_paste_frame" });
+            @export(&c.query_reply_encode, .{ .name = "ghostty_query_reply_encode" });
             @export(&c.terminfo_name, .{ .name = "ghostty_terminfo_name" });
             @export(&c.terminfo_source, .{ .name = "ghostty_terminfo_source" });
             @export(&c.terminal_paste, .{ .name = "ghostty_terminal_paste" });
