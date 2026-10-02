@@ -178,7 +178,11 @@ pub const DesktopNotification = extern struct {
     size: usize,
     title: lib.String,
     body: lib.String,
+    source: NotificationSource,
 };
+
+/// C: GhosttyTerminalNotificationSource
+pub const NotificationSource = osc.DesktopNotificationSource;
 
 /// C: GhosttyTerminalProgressState
 pub const ProgressState = osc.Command.ProgressReport.State;
@@ -564,6 +568,7 @@ const Effects = struct {
             .size = @sizeOf(DesktopNotification),
             .title = .init(notification.title),
             .body = .init(notification.body),
+            .source = notification.source,
         };
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
@@ -4761,6 +4766,7 @@ test "set desktop_notification callback" {
         var title_len: usize = 0;
         var body: [64]u8 = undefined;
         var body_len: usize = 0;
+        var source: NotificationSource = .osc9;
 
         fn desktopNotification(
             _: Terminal,
@@ -4770,6 +4776,7 @@ test "set desktop_notification callback" {
             count += 1;
             last_userdata = ud;
             last_size = notification.size;
+            source = notification.source;
             title_len = notification.title.len;
             body_len = notification.body.len;
             @memcpy(title[0..title_len], notification.title.ptr[0..title_len]);
@@ -4801,6 +4808,7 @@ test "set desktop_notification callback" {
     try testing.expectEqual(@sizeOf(DesktopNotification), S.last_size);
     try testing.expectEqualStrings("Codex", S.title[0..S.title_len]);
     try testing.expectEqualStrings("Needs attention", S.body[0..S.body_len]);
+    try testing.expectEqual(NotificationSource.osc777, S.source);
 
     // OSC 9 has no title and preserves its body.
     const seq_c = "\x1B]9;Build complete\x07";
@@ -4808,11 +4816,19 @@ test "set desktop_notification callback" {
     try testing.expectEqual(@as(usize, 2), S.count);
     try testing.expectEqualStrings("", S.title[0..S.title_len]);
     try testing.expectEqualStrings("Build complete", S.body[0..S.body_len]);
+    try testing.expectEqual(NotificationSource.osc9, S.source);
+
+    // OSC 777 with an empty title is still OSC 777.
+    const seq_d = "\x1B]777;notify;;Empty title\x07";
+    vt_write(t, seq_d, seq_d.len);
+    try testing.expectEqual(@as(usize, 3), S.count);
+    try testing.expectEqualStrings("", S.title[0..S.title_len]);
+    try testing.expectEqual(NotificationSource.osc777, S.source);
 
     // Removing the callback takes effect immediately.
     try testing.expectEqual(Result.success, set(t, .desktop_notification, null));
     vt_write(t, seq_c, seq_c.len);
-    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqual(@as(usize, 3), S.count);
 }
 
 test "set progress_report callback" {

@@ -412,16 +412,19 @@ pub const Action = union(Key) {
     pub const ShowDesktopNotification = struct {
         title: []const u8,
         body: []const u8,
+        source: osc.DesktopNotificationSource,
 
         pub const C = extern struct {
             title: lib.String,
             body: lib.String,
+            source: osc.DesktopNotificationSource,
         };
 
         pub fn cval(self: ShowDesktopNotification) ShowDesktopNotification.C {
             return .{
                 .title = .init(self.title),
                 .body = .init(self.body),
+                .source = self.source,
             };
         }
     };
@@ -2759,6 +2762,7 @@ pub fn Stream(comptime H: type) type {
                     self.handler.vt(.show_desktop_notification, .{
                         .title = v.title,
                         .body = v.body,
+                        .source = v.source,
                     });
                 },
 
