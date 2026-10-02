@@ -11,7 +11,9 @@ const log = std.log.scoped(.key_event);
 /// The UTF-8 text is not owned by this wrapper - the caller is responsible
 /// for ensuring the lifetime of any UTF-8 text set via set_utf8.
 const KeyEventWrapper = struct {
-    event: key.KeyEvent = .{},
+    // The C API never derives the kitty alternate keys: the caller supplies
+    // them (or omits them) with set_shifted_key and set_base_layout_key.
+    event: key.KeyEvent = .{ .alternates = .{ .provided = .{} } },
     alloc: Allocator,
 };
 
@@ -119,6 +121,26 @@ pub fn set_unshifted_codepoint(event_: Event, codepoint: u32) callconv(lib.calli
 pub fn get_unshifted_codepoint(event_: Event) callconv(lib.calling_conv) u32 {
     const event: *key.KeyEvent = &event_.?.event;
     return event.unshifted_codepoint;
+}
+
+pub fn set_shifted_key(event_: Event, codepoint: u32) callconv(lib.calling_conv) void {
+    const event: *key.KeyEvent = &event_.?.event;
+    event.alternates.provided.shifted = @truncate(codepoint);
+}
+
+pub fn get_shifted_key(event_: Event) callconv(lib.calling_conv) u32 {
+    const event: *key.KeyEvent = &event_.?.event;
+    return event.alternates.provided.shifted;
+}
+
+pub fn set_base_layout_key(event_: Event, codepoint: u32) callconv(lib.calling_conv) void {
+    const event: *key.KeyEvent = &event_.?.event;
+    event.alternates.provided.base_layout = @truncate(codepoint);
+}
+
+pub fn get_base_layout_key(event_: Event) callconv(lib.calling_conv) u32 {
+    const event: *key.KeyEvent = &event_.?.event;
+    return event.alternates.provided.base_layout;
 }
 
 test "alloc" {

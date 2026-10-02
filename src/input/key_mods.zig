@@ -36,7 +36,11 @@ pub const Mods = packed struct(Mods.Backing) {
     caps_lock: bool = false,
     num_lock: bool = false,
     sides: Side = .{},
-    _padding: u6 = 0,
+    // The kitty keyboard protocol has these two modifiers. They sit after
+    // the side bits so that every earlier bit keeps its value.
+    hyper: bool = false,
+    meta: bool = false,
+    _padding: u4 = 0,
 
     /// The standard modifier keys only. Does not include the lock keys,
     /// only standard bindable keys.

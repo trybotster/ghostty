@@ -127,6 +127,10 @@ fn kitty(
     const effective_mods = event.effectiveMods();
     const binding_mods = effective_mods.binding();
 
+    // True when no modifier that changes the encoding is held. Hyper and
+    // meta are kitty modifiers, so they count here.
+    const unmodified = binding_mods.empty() and !effective_mods.hyper and !effective_mods.meta;
+
     // Find the entry for this key in the kitty table.
     const entry_: ?KittyEntry = entry: {
         // Functional or predefined keys
@@ -185,7 +189,7 @@ fn kitty(
             // Quote ("report all" mode):
             // Note that all keys are reported as escape codes, including Enter,
             // Tab, Backspace etc.
-            if (binding_mods.empty()) {
+            if (unmodified) {
                 switch (event.key) {
                     .enter => return try writer.writeByte('\r'),
                     .tab => return try writer.writeByte('\t'),
@@ -197,7 +201,7 @@ fn kitty(
             // Send plain-text non-modified text directly to the terminal.
             // We don't send release events because those are specially encoded.
             if (event.utf8.len > 0 and
-                binding_mods.empty() and
+                unmodified and
                 event.action != .release)
             plain_text: {
                 // We only do this for printable characters. We should
@@ -257,6 +261,17 @@ fn kitty(
             // Break early if this is a control key
             if (isControl(seq.key)) break :alternates;
 
+            // A caller that supplies the alternate keys never has them
+            // derived: report exactly what it gave, and omit the rest.
+            switch (event.alternates) {
+                .derive => {},
+                .provided => |alt| {
+                    if (alt.shifted != 0) seq.alternates[0] = alt.shifted;
+                    if (alt.base_layout != 0) seq.alternates[1] = alt.base_layout;
+                    break :alternates;
+                },
+            }
+
             const view = std.unicode.Utf8View.init(event.utf8) catch {
                 // Assume invalid UTF-8 means no UTF-8.
                 break :alternates;
@@ -291,7 +306,10 @@ fn kitty(
             }
         }
 
+        // Associated text needs both "report all" (flag 8) and "report
+        // associated text" (flag 16).
         if (opts.kitty_flags.report_associated and
+            opts.kitty_flags.report_all and
             seq.event != .release)
         associated: {
             // Determine if the Alt modifier should be treated as an actual
@@ -308,6 +326,15 @@ fn kitty(
                 true;
 
             if (seq.mods.preventsText(alt_prevents_text)) break :associated;
+
+            // Text with any control codepoint (C0, DEL or C1) is left out of
+            // the associated-text parameter as a whole. It stays in `utf8`
+            // for the other uses of that field.
+            const view = std.unicode.Utf8View.init(event.utf8) catch break :associated;
+            var it = view.iterator();
+            while (it.nextCodepoint()) |cp| {
+                if (isControl(cp) or (cp >= 0x80 and cp <= 0x9F)) break :associated;
+            }
 
             seq.text = event.utf8;
         }
@@ -944,6 +971,8 @@ const KittyMods = packed struct(u8) {
             .alt = mods.alt,
             .ctrl = mods.ctrl,
             .super = mods.super,
+            .hyper = mods.hyper,
+            .meta = mods.meta,
             .caps_lock = mods.caps_lock,
             .num_lock = mods.num_lock,
         };
