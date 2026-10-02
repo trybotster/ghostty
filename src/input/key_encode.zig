@@ -3180,8 +3180,23 @@ test "legacy: shift with no text and no shifted key uppercases ASCII letters onl
 }
 
 test "legacy: shift with no text keeps the alt and derive behavior" {
-    // With alt held, the alt rule applies to the base character.
+    // With alt held, the alt rule applies to the base character: the result
+    // is what the same event without shift and without alternates gives, and
+    // the supplied shifted key is ignored.
     {
+        const opts: Options = .{ .alt_esc_prefix = true, .macos_option_as_alt = .true };
+
+        var expected_buf: [16]u8 = undefined;
+        var expected_writer: std.Io.Writer = .fixed(&expected_buf);
+        try legacy(&expected_writer, .{
+            .key = .key_a,
+            .mods = .{ .alt = true },
+            .utf8 = "",
+            .unshifted_codepoint = 'a',
+        }, opts);
+        // The comparison must not be vacuous.
+        try testing.expect(expected_writer.buffered().len > 0);
+
         var buf: [16]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&buf);
         try legacy(&writer, .{
@@ -3190,8 +3205,8 @@ test "legacy: shift with no text keeps the alt and derive behavior" {
             .utf8 = "",
             .unshifted_codepoint = 'a',
             .alternates = .{ .provided = .{ .shifted = 'A' } },
-        }, .{ .alt_esc_prefix = true, .macos_option_as_alt = .true });
-        try testing.expectEqualSlices(u8, &[_]u8{ 0x1B, 'a' }, writer.buffered());
+        }, opts);
+        try testing.expectEqualSlices(u8, expected_writer.buffered(), writer.buffered());
     }
 
     // Events that do not supply alternates are not changed.
