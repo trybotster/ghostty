@@ -1159,8 +1159,12 @@ typedef struct {
   GhosttyTerminalQueryKind kind;
 
   /**
-   * The exact bytes of the query sequence, from its first byte to its final
-   * byte. Valid only when `request_available` is true. Empty otherwise.
+   * The bytes of the recognized query sequence, from its first byte to its
+   * final byte (including the backslash of an ST). A C0 control that the
+   * terminal executes inside an unfinished sequence is not one of them: it is
+   * its own query when it is one (for example ESC [ ENQ 5 n reports an ENQ
+   * query with the byte ENQ, and then a status query with ESC [ 5 n). Valid
+   * only when `request_available` is true. Empty otherwise.
    */
   GhosttyString request;
 
@@ -2909,8 +2913,9 @@ GHOSTTY_API GhosttyResult ghostty_terminal_vt_write_until_ground(
  *
  * A query is a sequence that expects a reply (see GhosttyTerminalQueryKind).
  * The GHOSTTY_TERMINAL_OPT_QUERY callback runs once, inside this call, with
- * the exact bytes of the sequence from its first byte to its final byte. The
- * terminal's own reply, if any, is written through the write_pty callback
+ * the bytes of the recognized sequence from its first byte to its final byte,
+ * without C0 controls that the terminal executes inside it (steward ruling
+ * R-17). The terminal's own reply, if any, is written through the write_pty callback
  * right after it. Nothing after the query sequence is processed, so the
  * embedder can hold the reply, offer the query elsewhere, and write the rest
  * of the data with another call.
