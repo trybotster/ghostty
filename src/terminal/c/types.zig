@@ -197,6 +197,7 @@ const type_decls = [_]TypeDecl{
     .initStruct("GhosttyMouseEncoderSize", mouse_encode.Size),
     .initStruct("GhosttyMousePosition", mouse_event.Position),
     .initStruct("GhosttyPaste", paste.Request),
+    .initStruct("GhosttyPasteFrame", paste.Frame),
     .initTaggedStruct("GhosttyPoint", point.Point.C, "tag", "value", .generated),
     .initStruct("GhosttyPointCoordinate", point.Coordinate),
     .initUnion("GhosttyPointValue", point.Point.CValue, point.Point.C),

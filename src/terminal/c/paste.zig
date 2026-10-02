@@ -158,6 +158,41 @@ pub fn encode(
     return .success;
 }
 
+/// The marker frame of a paste, with no payload and no payload rewrite.
+///
+/// C: GhosttyPasteFrame
+pub const Frame = extern struct {
+    prefix: lib.String,
+    suffix: lib.String,
+};
+
+pub fn frame(bracketed: bool, out: ?*Frame) callconv(lib.calling_conv) void {
+    const dst = out orelse return;
+    dst.* = if (bracketed) .{
+        .prefix = .init(@as([]const u8, paste.bracketed_prefix)),
+        .suffix = .init(@as([]const u8, paste.bracketed_suffix)),
+    } else .{
+        .prefix = .init(@as([]const u8, "")),
+        .suffix = .init(@as([]const u8, "")),
+    };
+}
+
+test "frame bracketed" {
+    const testing = std.testing;
+    var f: Frame = undefined;
+    frame(true, &f);
+    try testing.expectEqualStrings("\x1b[200~", f.prefix.ptr[0..f.prefix.len]);
+    try testing.expectEqualStrings("\x1b[201~", f.suffix.ptr[0..f.suffix.len]);
+}
+
+test "frame unbracketed is empty" {
+    const testing = std.testing;
+    var f: Frame = undefined;
+    frame(false, &f);
+    try testing.expectEqual(@as(usize, 0), f.prefix.len);
+    try testing.expectEqual(@as(usize, 0), f.suffix.len);
+}
+
 test "encode bracketed" {
     const testing = std.testing;
     const input = try testing.allocator.dupe(u8, "hello");
