@@ -2449,6 +2449,21 @@ pub fn Stream(comptime H: type) type {
                                     "ignoring CSI 21 t with extra parameters: {f}",
                                     .{input},
                                 ),
+                                inline 11, 13, 15, 19, 20 => |number| if (input.params.len == 1) {
+                                    // Queries that the terminal has no answer for.
+                                    // They are reported so an embedder can answer.
+                                    self.handler.vt(.size_report, switch (number) {
+                                        11 => .csi_11_t,
+                                        13 => .csi_13_t,
+                                        15 => .csi_15_t,
+                                        19 => .csi_19_t,
+                                        20 => .csi_20_t,
+                                        else => comptime unreachable,
+                                    });
+                                } else log.warn(
+                                    "ignoring CSI t query with extra parameters: {f}",
+                                    .{input},
+                                ),
                                 inline 22, 23 => |number| if ((input.params.len == 2 or
                                     input.params.len == 3) and
                                     // we only support window title

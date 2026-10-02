@@ -47,6 +47,9 @@ const log = std.log.scoped(.terminal_c);
 /// opts in through `GHOSTTY_TERMINAL_OPT_CONTINUATION_MAX_BYTES`.
 pub const default_continuation_max_bytes: usize = 0;
 
+/// The default limit for the request bytes that a query reports.
+pub const default_query_max_bytes: usize = 4096;
+
 /// Owns the `std.Io` implementation retained by every C terminal.
 ///
 /// Snapshot decoding creates this before the native terminal exists and
@@ -85,6 +88,22 @@ const TerminalWrapper = struct {
     terminfo_name_buf: [Handler.max_terminfo_name_bytes]u8,
     stream: Stream,
     effects: Effects = .{},
+    /// The raw bytes of the sequence that `vt_write_until_query` is
+    /// feeding, from the last ground state. Bounded by `query_raw_max`.
+    query_raw: std.ArrayListUnmanaged(u8) = .empty,
+    query_raw_max: usize = default_query_max_bytes,
+    /// True while `vt_write_until_query` keeps `query_raw`.
+    query_raw_active: bool = false,
+    /// True when the sequence was longer than `query_raw_max` (or the
+    /// buffer could not grow), so `query_raw` holds only its start.
+    query_raw_truncated: bool = false,
+    /// True when the run that is unfinished at the end of the last write
+    /// has all of its bytes in `query_raw`, so a later
+    /// `vt_write_until_query` can continue it.
+    query_raw_open: bool = false,
+    /// True when the current run began in a write that did not keep its
+    /// bytes, so `query_raw` cannot hold the whole sequence.
+    query_raw_lost: bool = false,
     tracked_grid_refs: std.AutoArrayHashMapUnmanaged(*grid_ref_tracked_c.TrackedGridRef, void) = .{},
     searches: std.AutoArrayHashMapUnmanaged(*search_c.SearchWrapper, void) = .{},
 
@@ -183,6 +202,26 @@ pub const DesktopNotification = extern struct {
 
 /// C: GhosttyTerminalNotificationSource
 pub const NotificationSource = osc.DesktopNotificationSource;
+
+/// C: GhosttyTerminalQueryKind
+pub const QueryKind = Handler.Query;
+
+/// A query that expects a reply from the terminal. See
+/// `GHOSTTY_TERMINAL_OPT_QUERY`.
+///
+/// C: GhosttyTerminalQuery
+pub const Query = extern struct {
+    size: usize,
+    kind: QueryKind,
+    /// The exact bytes of the query sequence, from its first byte to its
+    /// final byte, when `request_available` is true. Empty otherwise.
+    request: lib.String,
+    /// True when the bytes were fed through `vt_write_until_query`.
+    request_available: bool,
+    /// True when the sequence was longer than the request limit. `request`
+    /// then holds only the first bytes of it.
+    request_truncated: bool,
+};
 
 /// C: GhosttyTerminalProgressState
 pub const ProgressState = osc.Command.ProgressReport.State;
@@ -291,6 +330,7 @@ const Effects = struct {
     clipboard_read: ?ClipboardReadFn = null,
     unknown_sequence: ?UnknownSequenceFn = null,
     render_hold: ?RenderHoldFn = null,
+    query: ?QueryFn = null,
 
     /// Scratch buffer for DA1 feature codes. The device attributes
     /// trampoline converts C feature codes into this buffer and returns
@@ -350,6 +390,9 @@ const Effects = struct {
     /// C function pointer type for the semantic_prompt callback. The event
     /// and its strings are borrowed for the callback duration.
     pub const SemanticPromptFn = *const fn (Terminal, ?*anyopaque, *const SemanticPrompt) callconv(lib.calling_conv) void;
+
+    /// C function pointer type for the query callback.
+    pub const QueryFn = *const fn (Terminal, ?*anyopaque, *const Query) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the reset callback.
     pub const ResetFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -573,6 +616,23 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
 
+    fn queryTrampoline(handler: *Handler, kind: Handler.Query) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        const func = wrapper.effects.query orelse return;
+        const raw: []const u8 = if (wrapper.query_raw_active and !wrapper.query_raw_lost)
+            wrapper.query_raw.items
+        else
+            "";
+        const request: Query = .{
+            .size = @sizeOf(Query),
+            .kind = kind,
+            .request = .init(raw),
+            .request_available = wrapper.query_raw_active and !wrapper.query_raw_lost,
+            .request_truncated = wrapper.query_raw_active and !wrapper.query_raw_lost and wrapper.query_raw_truncated,
+        };
+        func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+    }
+
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.color_scheme orelse return null;
@@ -753,6 +813,7 @@ fn wrap(
         .reset = &Effects.resetTrampoline,
         .size = &Effects.sizeTrampoline,
         .render_hold = &Effects.renderHoldTrampoline,
+        .query = &Effects.queryTrampoline,
 
         // Installed dynamically when the callback is set; see Effects.
         .clipboard_write = null,
@@ -936,6 +997,7 @@ pub fn vt_write(
     len: usize,
 ) callconv(lib.calling_conv) void {
     const wrapper = terminal_ orelse return;
+    wrapper.query_raw_open = false;
     wrapper.stream.nextSlice(ptr[0..len]);
 }
 
@@ -956,12 +1018,148 @@ pub fn vt_write_until_ground(
     else
         return .invalid_value;
 
+    wrapper.query_raw_open = false;
     if (wrapper.stream.nextSliceUntilGround(input)) |consumed| {
         out_consumed.* = consumed;
         return .success;
     }
 
     out_consumed.* = len;
+    return .no_value;
+}
+
+/// True for a byte that can start a sequence with a reply: ESC, ENQ and the
+/// C1 introducers (also seen as UTF-8 continuation bytes, which only means
+/// that the byte-wise path handles them).
+fn queryStartByte(c: u8) bool {
+    return switch (c) {
+        0x05, 0x1b, 0x90, 0x98, 0x9b, 0x9d, 0x9e, 0x9f => true,
+        else => false,
+    };
+}
+
+fn stringState(state: @import("../Parser.zig").State) bool {
+    return switch (state) {
+        .osc_string, .dcs_passthrough, .sos_pm_apc_string => true,
+        else => false,
+    };
+}
+
+/// Keep one byte of the run that `vt_write_until_query` is feeding, within
+/// the request limit.
+fn queryRawAppend(wrapper: *TerminalWrapper, alloc: std.mem.Allocator, c: u8) void {
+    wrapper.query_raw_active = true;
+    if (wrapper.query_raw.items.len < wrapper.query_raw_max) {
+        wrapper.query_raw.append(alloc, c) catch {
+            wrapper.query_raw_truncated = true;
+        };
+    } else {
+        wrapper.query_raw_truncated = true;
+    }
+}
+
+/// Feed `input` up to and including the byte that completes the first query
+/// sequence, or all of it when no query completes.
+///
+/// The `query` effect runs inside this call, once, with the exact bytes of
+/// the sequence from its first byte to its final byte. A query is any
+/// sequence that expects a reply (see `GhosttyTerminalQueryKind`).
+pub fn vt_write_until_query(
+    terminal_: Terminal,
+    ptr_: ?[*]const u8,
+    len: usize,
+    out_consumed_: ?*usize,
+) callconv(lib.calling_conv) Result {
+    const out_consumed = out_consumed_ orelse return .invalid_value;
+    out_consumed.* = 0;
+
+    const wrapper = terminal_ orelse return .invalid_value;
+    const input: []const u8 = if (ptr_) |ptr|
+        ptr[0..len]
+    else if (len == 0)
+        ""
+    else
+        return .invalid_value;
+
+    const alloc = wrapper.terminal.gpa();
+    wrapper.stream.handler.query_reported = false;
+    defer {
+        wrapper.query_raw_active = false;
+        wrapper.query_raw_open = !wrapper.stream.ground();
+        wrapper.stream.handler.query_reported = false;
+    }
+
+    // True when the next byte begins a new run that `query_raw` keeps.
+    var fresh = false;
+    if (wrapper.stream.ground()) {
+        fresh = true;
+    } else if (!wrapper.query_raw_open) {
+        // A run began in a write that did not keep its bytes.
+        wrapper.query_raw.clearRetainingCapacity();
+        wrapper.query_raw_truncated = false;
+        wrapper.query_raw_lost = true;
+    }
+    var i: usize = 0;
+    while (i < input.len) {
+        if (wrapper.stream.ground()) {
+            // Plain text and controls cannot complete a query, so feed
+            // everything before the next possible start in one call.
+            var end: usize = i;
+            while (end < input.len and !queryStartByte(input[end])) end += 1;
+            if (end > i) {
+                wrapper.stream.nextSlice(input[i..end]);
+                i = end;
+                fresh = true;
+                continue;
+            }
+        }
+
+        // A run starts here: keep its bytes from now on. A run is
+        // everything from the last ground state (or the last bulk feed,
+        // which can end in the middle of a UTF-8 character) to the end of
+        // the sequence.
+        if (fresh) {
+            wrapper.query_raw.clearRetainingCapacity();
+            wrapper.query_raw_truncated = false;
+            wrapper.query_raw_lost = false;
+            fresh = false;
+        }
+
+        // A string sequence ends with ST (ESC \), and the stream completes
+        // it on the ESC. An ESC that is the last byte of the input may be
+        // the first byte of an ST whose second byte comes later, so leave
+        // it unconsumed. The caller offers it again with the next bytes.
+        const c = input[i];
+        if (c == 0x1b and i + 1 == input.len and stringState(wrapper.stream.parser.state)) {
+            out_consumed.* = i;
+            return .no_value;
+        }
+
+        // Keep the byte before the stream sees it, because the effect runs
+        // inside `next` for the byte that completes the sequence. The
+        // stream completes a string sequence on the ESC of its ST, so when
+        // the `\` follows, keep it too before the effect runs, and feed it
+        // right after, so the reported bytes are the whole sequence.
+        const st = c == 0x1b and i + 1 < input.len and input[i + 1] == '\\' and
+            stringState(wrapper.stream.parser.state);
+        queryRawAppend(wrapper, alloc, c);
+        if (st) queryRawAppend(wrapper, alloc, '\\');
+        wrapper.stream.next(c);
+        i += 1;
+        if (st) {
+            wrapper.stream.next('\\');
+            i += 1;
+        }
+
+        if (wrapper.stream.handler.query_reported) {
+            out_consumed.* = i;
+            return .success;
+        }
+
+        if (wrapper.stream.ground()) fresh = true;
+    }
+
+    out_consumed.* = input.len;
     return .no_value;
 }
 
@@ -1257,6 +1455,8 @@ pub const Option = enum(c_int) {
     render_hold = 41,
     semantic_prompt = 42,
     reset = 43,
+    query = 44,
+    query_max_bytes = 45,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -1279,6 +1479,7 @@ pub const Option = enum(c_int) {
             .render_hold => ?Effects.RenderHoldFn,
             .semantic_prompt => ?Effects.SemanticPromptFn,
             .reset => ?Effects.ResetFn,
+            .query => ?Effects.QueryFn,
             .title, .pwd, .terminfo_name => ?*const lib.String,
             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
             .color_palette => ?*const color.PaletteC,
@@ -1296,6 +1497,7 @@ pub const Option = enum(c_int) {
             .scrollback_max_lines,
             .continuation_max_bytes,
             .unknown_max_bytes,
+            .query_max_bytes,
             .clipboard_write_max_bytes,
             => ?*const usize,
             .selection => ?*const selection_c.CSelection,
@@ -1350,6 +1552,8 @@ fn setTyped(
         .render_hold => wrapper.effects.render_hold = value,
         .semantic_prompt => wrapper.effects.semantic_prompt = value,
         .reset => wrapper.effects.reset = value,
+        .query => wrapper.effects.query = value,
+        .query_max_bytes => wrapper.query_raw_max = if (value) |ptr| ptr.* else default_query_max_bytes,
         .clipboard_write => {
             wrapper.effects.clipboard_write = value;
             wrapper.stream.handler.effects.clipboard_write = if (value != null)
@@ -1997,6 +2201,7 @@ pub fn free(terminal_: Terminal) callconv(lib.calling_conv) void {
     for (wrapper.searches.keys()) |search| search.terminal = null;
     wrapper.searches.deinit(alloc);
     wrapper.stream.deinit();
+    wrapper.query_raw.deinit(alloc);
     t.deinit(alloc);
     if (wrapper.tmp_dir_path) |path| alloc.free(path);
     alloc.destroy(t);
@@ -6845,4 +7050,259 @@ test "get mouse_shape" {
     vt_write(t, "\x07", 1);
     try testing.expectEqual(Result.success, get(t, .mouse_shape, @ptrCast(&shape)));
     try testing.expectEqual(mouse.Shape.wait, shape);
+}
+
+/// Records the query callback and write_pty calls of a test terminal.
+const QueryProbe = struct {
+    var count: usize = 0;
+    var kind: QueryKind = .invalid;
+    var raw: [8192]u8 = undefined;
+    var raw_len: usize = 0;
+    var available: bool = false;
+    var truncated: bool = false;
+    var events: [8]u8 = undefined;
+    var events_len: usize = 0;
+
+    fn reset() void {
+        count = 0;
+        kind = .invalid;
+        raw_len = 0;
+        available = false;
+        truncated = false;
+        events_len = 0;
+    }
+
+    fn query(_: Terminal, _: ?*anyopaque, q: *const Query) callconv(lib.calling_conv) void {
+        count += 1;
+        kind = q.kind;
+        raw_len = q.request.len;
+        @memcpy(raw[0..raw_len], q.request.ptr[0..raw_len]);
+        available = q.request_available;
+        truncated = q.request_truncated;
+        events[events_len] = 'q';
+        events_len += 1;
+    }
+
+    fn writePty(_: Terminal, _: ?*anyopaque, _: [*]const u8, _: usize) callconv(lib.calling_conv) void {
+        events[events_len] = 'w';
+        events_len += 1;
+    }
+};
+
+fn queryProbeTerminal() !Terminal {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(&lib.alloc.test_allocator, &t, 80, 24));
+    QueryProbe.reset();
+    try testing.expectEqual(Result.success, set(t, .query, @ptrCast(&QueryProbe.query)));
+    try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&QueryProbe.writePty)));
+    return t;
+}
+
+test "vt_write_until_query reports every query kind with its exact bytes" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // The sequences are the stimulus. The reported bytes must equal them.
+    const cases = [_]struct { seq: []const u8, kind: QueryKind }{
+        .{ .seq = "\x1b[c", .kind = .device_attributes_primary },
+        .{ .seq = "\x1b[>c", .kind = .device_attributes_secondary },
+        .{ .seq = "\x1b[=c", .kind = .device_attributes_tertiary },
+        .{ .seq = "\x1b[5n", .kind = .operating_status },
+        .{ .seq = "\x1b[6n", .kind = .cursor_position },
+        .{ .seq = "\x1b[?996n", .kind = .color_scheme },
+        .{ .seq = "\x1b[?998n", .kind = .visibility },
+        .{ .seq = "\x05", .kind = .enquiry },
+        .{ .seq = "\x1b[?u", .kind = .kitty_keyboard },
+        .{ .seq = "\x1b[4$p", .kind = .mode_report },
+        .{ .seq = "\x1b[?25$p", .kind = .mode_report },
+        .{ .seq = "\x1b[?9999$p", .kind = .mode_report },
+        .{ .seq = "\x1b[>q", .kind = .xtversion },
+        .{ .seq = "\x1b[14t", .kind = .size_csi_14_t },
+        .{ .seq = "\x1b[16t", .kind = .size_csi_16_t },
+        .{ .seq = "\x1b[18t", .kind = .size_csi_18_t },
+        .{ .seq = "\x1b[21t", .kind = .size_csi_21_t },
+        .{ .seq = "\x1b[11t", .kind = .size_csi_11_t },
+        .{ .seq = "\x1b[13t", .kind = .size_csi_13_t },
+        .{ .seq = "\x1b[15t", .kind = .size_csi_15_t },
+        .{ .seq = "\x1b[19t", .kind = .size_csi_19_t },
+        .{ .seq = "\x1b[20t", .kind = .size_csi_20_t },
+        .{ .seq = "\x1bP$qm\x1b\\", .kind = .decrqss },
+        .{ .seq = "\x1bP+q544e\x1b\\", .kind = .xtgettcap },
+        .{ .seq = "\x1b]10;?\x1b\\", .kind = .osc_color },
+        .{ .seq = "\x1b]4;1;?;2;?\x07", .kind = .osc_color },
+        .{ .seq = "\x1b]21;foreground=?\x1b\\", .kind = .kitty_color },
+        .{ .seq = "\x1b]52;c;?\x1b\\", .kind = .clipboard_read },
+        .{ .seq = "\x1b]5522;type=read;dGV4dC9wbGFpbg==\x1b\\", .kind = .kitty_clipboard_read },
+    };
+
+    for (cases) |case| {
+        QueryProbe.reset();
+        var buf: [128]u8 = undefined;
+        const input = try std.fmt.bufPrint(&buf, "abc{s}tail", .{case.seq});
+
+        var consumed: usize = 0;
+        try testing.expectEqual(
+            Result.success,
+            vt_write_until_query(t, input.ptr, input.len, &consumed),
+        );
+        // It stops right after the final byte of the query sequence.
+        try testing.expectEqual(3 + case.seq.len, consumed);
+        try testing.expectEqual(@as(usize, 1), QueryProbe.count);
+        try testing.expectEqual(case.kind, QueryProbe.kind);
+        try testing.expect(QueryProbe.available);
+        try testing.expect(!QueryProbe.truncated);
+        try testing.expectEqualSlices(u8, input[3..consumed], QueryProbe.raw[0..QueryProbe.raw_len]);
+    }
+}
+
+test "vt_write_until_query continues a query split across calls" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const seq = "\x1b]52;c;?\x1b\\";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.no_value,
+        vt_write_until_query(t, "xy\x1b]52;c", 8, &consumed),
+    );
+    try testing.expectEqual(@as(usize, 8), consumed);
+    try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+
+    const rest = ";?\x1b\\more";
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, rest.ptr, rest.len, &consumed),
+    );
+    try testing.expectEqual(@as(usize, 4), consumed);
+    try testing.expectEqual(@as(usize, 1), QueryProbe.count);
+    try testing.expectEqual(QueryKind.clipboard_read, QueryProbe.kind);
+    try testing.expect(QueryProbe.available);
+    try testing.expectEqualSlices(u8, seq, QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query reports a query fed by plain vt_write without its bytes" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // The start of the sequence goes through vt_write, which keeps no bytes.
+    vt_write(t, "\x1b[5", 3);
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, "n", 1, &consumed),
+    );
+    try testing.expectEqual(@as(usize, 1), QueryProbe.count);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expect(!QueryProbe.available);
+    try testing.expectEqual(@as(usize, 0), QueryProbe.raw_len);
+
+    // Plain vt_write still reports the query, without bytes.
+    QueryProbe.reset();
+    vt_write(t, "\x1b[6n", 4);
+    try testing.expectEqual(@as(usize, 1), QueryProbe.count);
+    try testing.expectEqual(QueryKind.cursor_position, QueryProbe.kind);
+    try testing.expect(!QueryProbe.available);
+}
+
+test "vt_write_until_query returns no_value when no query completes" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    var consumed: usize = 0;
+    const input = "plain text \x1b[31mred\x1b[0m and more";
+    try testing.expectEqual(
+        Result.no_value,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+
+    // The text reached the terminal.
+    const str = try t.?.terminal.plainString(testing.allocator);
+    defer testing.allocator.free(str);
+    try testing.expect(std.mem.startsWith(u8, str, "plain text red and more"));
+}
+
+test "vt_write_until_query stops at each of two queries and runs the effect before the reply" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const input = "\x1b[5n\x1b[6n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(@as(usize, 4), consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    // The effect is called first. The reply follows through write_pty.
+    try testing.expectEqualSlices(u8, "qw", QueryProbe.events[0..QueryProbe.events_len]);
+
+    QueryProbe.reset();
+    const rest = input[consumed..];
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, rest.ptr, rest.len, &consumed),
+    );
+    try testing.expectEqual(@as(usize, 4), consumed);
+    try testing.expectEqual(QueryKind.cursor_position, QueryProbe.kind);
+    try testing.expectEqualSlices(u8, "qw", QueryProbe.events[0..QueryProbe.events_len]);
+}
+
+test "vt_write_until_query truncates a request over the limit" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const limit: usize = 8;
+    try testing.expectEqual(Result.success, set(t, .query_max_bytes, &limit));
+
+    const input = "\x1b]4;1;?;2;?;3;?;4;?\x07";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(QueryKind.osc_color, QueryProbe.kind);
+    try testing.expect(QueryProbe.available);
+    try testing.expect(QueryProbe.truncated);
+    try testing.expectEqualSlices(u8, input[0..limit], QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query argument checks" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    var consumed: usize = 99;
+    try testing.expectEqual(Result.invalid_value, vt_write_until_query(t, null, 1, &consumed));
+    try testing.expectEqual(Result.no_value, vt_write_until_query(t, null, 0, &consumed));
+    try testing.expectEqual(@as(usize, 0), consumed);
+    try testing.expectEqual(Result.invalid_value, vt_write_until_query(null, "a", 1, &consumed));
+    try testing.expectEqual(Result.invalid_value, vt_write_until_query(t, "a", 1, null));
+}
+
+test "vt_write_until_query leaves a trailing ESC of an unfinished string unconsumed" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const seq = "\x1b]52;c;?\x1b\\";
+    var consumed: usize = 0;
+    // The input ends right after the ESC that may start the ST.
+    try testing.expectEqual(
+        Result.no_value,
+        vt_write_until_query(t, seq.ptr, seq.len - 1, &consumed),
+    );
+    try testing.expectEqual(seq.len - 2, consumed);
+    try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+
+    // Offering the ESC again with the next byte reports the whole sequence.
+    const rest = seq[consumed..];
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, rest.ptr, rest.len, &consumed),
+    );
+    try testing.expectEqual(rest.len, consumed);
+    try testing.expectEqual(@as(usize, 1), QueryProbe.count);
+    try testing.expect(QueryProbe.available);
+    try testing.expectEqualSlices(u8, seq, QueryProbe.raw[0..QueryProbe.raw_len]);
 }
