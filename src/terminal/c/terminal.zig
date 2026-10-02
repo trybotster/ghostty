@@ -2014,6 +2014,8 @@ pub const TerminalData = enum(c_int) {
     clipboard_write_max_bytes = 40,
     mouse_shape = 41,
     memory_usage = 42,
+    mouse_event = 43,
+    mouse_format = 44,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
@@ -2029,6 +2031,8 @@ pub const TerminalData = enum(c_int) {
             .cursor_at_prompt,
             => bool,
             .mouse_shape => mouse.Shape,
+            .mouse_event => mouse.Event,
+            .mouse_format => mouse.Format,
             .active_screen => TerminalScreen,
             .kitty_keyboard_flags => u8,
             .scrollbar => TerminalScrollbar,
@@ -2132,6 +2136,8 @@ fn getTyped(
             t.modes.get(.mouse_event_button) or
             t.modes.get(.mouse_event_any),
         .mouse_shape => out.* = t.mouse_shape,
+        .mouse_event => out.* = t.flags.mouse_event,
+        .mouse_format => out.* = t.flags.mouse_format,
         .title => {
             const title = t.getTitle() orelse "";
             out.* = .{ .ptr = title.ptr, .len = title.len };
@@ -7730,4 +7736,40 @@ test "vt_write_until_query starts a new request at a C1 introducer that ends an 
     try testing.expectEqual(whole.len, consumed);
     try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
     try testing.expectEqualSlices(u8, second, QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "get mouse_event and mouse_format are the active enums, not the mode bits" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(&lib.alloc.test_allocator, &t, 80, 24));
+    defer free(t);
+
+    var event: mouse.Event = undefined;
+    var format: mouse.Format = undefined;
+
+    // Nothing is set at first.
+    try testing.expectEqual(Result.success, get(t, .mouse_event, @ptrCast(&event)));
+    try testing.expectEqual(mouse.Event.none, event);
+    try testing.expectEqual(Result.success, get(t, .mouse_format, @ptrCast(&format)));
+    try testing.expectEqual(mouse.Format.x10, format);
+
+    // Two histories with the same mode bits and different active modes.
+    vt_write(t, "\x1b[?1000h\x1b[?1003h", 16);
+    try testing.expectEqual(Result.success, get(t, .mouse_event, @ptrCast(&event)));
+    try testing.expectEqual(mouse.Event.any, event);
+
+    vt_write(t, "\x1b[?1003l\x1b[?1000l", 16);
+    vt_write(t, "\x1b[?1003h\x1b[?1000h", 16);
+    try testing.expectEqual(Result.success, get(t, .mouse_event, @ptrCast(&event)));
+    try testing.expectEqual(mouse.Event.normal, event);
+
+    // The formats.
+    vt_write(t, "\x1b[?1006h", 8);
+    try testing.expectEqual(Result.success, get(t, .mouse_format, @ptrCast(&format)));
+    try testing.expectEqual(mouse.Format.sgr, format);
+    vt_write(t, "\x1b[?1016h", 8);
+    try testing.expectEqual(Result.success, get(t, .mouse_format, @ptrCast(&format)));
+    try testing.expectEqual(mouse.Format.sgr_pixels, format);
+    vt_write(t, "\x1b[?1016l", 8);
+    try testing.expectEqual(Result.success, get(t, .mouse_format, @ptrCast(&format)));
+    try testing.expectEqual(mouse.Format.x10, format);
 }
