@@ -123,7 +123,13 @@ fn initVt(
         // no-libcxx mode (HWY_NO_LIBCXX / SIMDUTF_NO_LIBCXX) so we
         // don't need libcpp. System-provided simdutf headers still
         // use C++ stdlib headers, so we need libcpp in that case.
-        .link_libc = if (cfg.simd) true else null,
+        //
+        // On Linux the vendored C code (wuffs) calls calloc. A module that does
+        // not link libc makes Zig compile its own malloc.zig into the archive,
+        // which defines calloc and free and leaves malloc and realloc to the
+        // host libc. A static consumer then frees host memory with the wrong
+        // free. Linking libc keeps every allocator symbol with the host libc.
+        .link_libc = if (cfg.simd or cfg.target.result.os.tag == .linux) true else null,
         .link_libcpp = if (cfg.simd and
             b.systemIntegrationOption("simdutf", .{}) and
             cfg.target.result.abi != .msvc) true else null,
