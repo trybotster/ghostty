@@ -68,10 +68,28 @@ pub const Event = struct {
     /// size are also allowed and indicate right or below the terminal.
     pos: Pos = .{},
 
+    /// The zero-based cell of the event, when the caller already knows it.
+    ///
+    /// A caller that has cell coordinates (and no pixel position for the
+    /// cell formats) sets this. The encoder then uses the cell exactly as
+    /// given: it is not converted from a pixel position, it is not clamped to
+    /// the grid, and it is not tested against the viewport, so a release or
+    /// motion outside the grid is reported at the cell that was given. A cell
+    /// that the active format cannot express produces no output.
+    ///
+    /// SGR pixel reporting ignores the cell and uses `pos`.
+    cell: ?Cell = null,
+
     /// Mouse position in surface-space pixels.
     pub const Pos = extern struct {
         x: f32 = 0,
         y: f32 = 0,
+    };
+
+    /// A zero-based terminal cell.
+    pub const Cell = extern struct {
+        col: u32,
+        row: u32,
     };
 };
 
@@ -85,41 +103,62 @@ pub fn encode(
 ) std.Io.Writer.Error!void {
     if (!shouldReport(event, opts)) return;
 
-    // Handle scenarios where the mouse position is outside the viewport.
-    // We always report release events no matter where they happen.
-    if (event.action != .release and
-        posOutOfViewport(event.pos, opts.size))
-    {
-        // If we don't have a motion-tracking event mode, do nothing,
-        // because events outside the viewport are never reported in
-        // such cases.
-        if (!terminal.mouse.eventSendsMotion(opts.event)) return;
+    // A caller-supplied cell is used exactly as given (see Event.cell),
+    // except for SGR pixels, which reports the pixel position.
+    const supplied: ?Event.Cell = if (opts.format == .sgr_pixels) null else event.cell;
 
-        // For motion modes, we only report if a button is currently pressed.
-        // This lets a TUI detect a click over the surface + drag out
-        // of the surface.
-        if (!opts.any_button_pressed) return;
+    var cell_x: u32 = undefined;
+    var cell_y: u32 = undefined;
+    // The cell that motion deduplication compares, if it can hold the cell.
+    var tracked: ?point.Coordinate = null;
+    if (supplied) |given| {
+        cell_x = given.col;
+        cell_y = given.row;
+        if (given.col <= std.math.maxInt(terminal.size.CellCountInt)) {
+            tracked = .{ .x = @intCast(given.col), .y = given.row };
+        }
+    } else {
+        // Handle scenarios where the mouse position is outside the viewport.
+        // We always report release events no matter where they happen.
+        if (event.action != .release and
+            posOutOfViewport(event.pos, opts.size))
+        {
+            // If we don't have a motion-tracking event mode, do nothing,
+            // because events outside the viewport are never reported in
+            // such cases.
+            if (!terminal.mouse.eventSendsMotion(opts.event)) return;
+
+            // For motion modes, we only report if a button is currently pressed.
+            // This lets a TUI detect a click over the surface + drag out
+            // of the surface.
+            if (!opts.any_button_pressed) return;
+        }
+
+        const cell = posToCell(event.pos, opts.size);
+        cell_x = cell.x;
+        cell_y = cell.y;
+        tracked = cell;
     }
-
-    const cell = posToCell(event.pos, opts.size);
 
     // We only send motion events when the cell changed unless
     // we're tracking raw pixels.
     if (event.action == .motion and opts.format != .sgr_pixels) {
         if (opts.last_cell) |last| {
             if (last.*) |last_cell| {
-                if (last_cell.eql(cell)) return;
+                if (tracked) |current| {
+                    if (last_cell.eql(current)) return;
+                }
             }
         }
     }
 
     // Update the last reported cell if we are tracking it.
-    if (opts.last_cell) |last| last.* = cell;
+    if (opts.last_cell) |last| last.* = tracked;
 
     const button_code = buttonCode(event, opts) orelse return;
     switch (opts.format) {
         .x10 => {
-            if (cell.x > 222 or cell.y > 222) {
+            if (cell_x > 222 or cell_y > 222) {
                 log.info("X10 mouse format can only encode X/Y up to 223", .{});
                 return;
             }
@@ -127,17 +166,24 @@ pub fn encode(
             // + 1 because our x/y are zero-indexed and the protocol uses 1-indexing.
             try writer.writeAll("\x1B[M");
             try writer.writeByte(32 + button_code);
-            try writer.writeByte(32 + @as(u8, @intCast(cell.x)) + 1);
-            try writer.writeByte(32 + @as(u8, @intCast(cell.y)) + 1);
+            try writer.writeByte(32 + @as(u8, @intCast(cell_x)) + 1);
+            try writer.writeByte(32 + @as(u8, @intCast(cell_y)) + 1);
         },
 
         .utf8 => {
+            // The UTF-8 format has two bytes per coordinate, so the largest
+            // code point is U+07FF (a cell of 2014).
+            if (cell_x > 2014 or cell_y > 2014) {
+                log.info("UTF-8 mouse format can only encode X/Y up to 2015", .{});
+                return;
+            }
+
             try writer.writeAll("\x1B[M");
             try writer.printUnicodeCodepoint(32 + @as(u21, button_code));
 
             var buf: [4]u8 = undefined;
-            const x_cp: u21 = @intCast(@as(u32, cell.x) + 33);
-            const y_cp: u21 = @intCast(cell.y + 33);
+            const x_cp: u21 = @intCast(cell_x + 33);
+            const y_cp: u21 = @intCast(cell_y + 33);
 
             const x_len = std.unicode.utf8Encode(x_cp, &buf) catch unreachable;
             try writer.writeAll(buf[0..x_len]);
@@ -148,15 +194,15 @@ pub fn encode(
 
         .sgr => try writer.print("\x1B[<{d};{d};{d}{c}", .{
             button_code,
-            cell.x + 1,
-            cell.y + 1,
+            @as(u64, cell_x) + 1,
+            @as(u64, cell_y) + 1,
             @as(u8, if (event.action == .release) 'm' else 'M'),
         }),
 
         .urxvt => try writer.print("\x1B[{d};{d};{d}M", .{
             32 + button_code,
-            cell.x + 1,
-            cell.y + 1,
+            @as(u64, cell_x) + 1,
+            @as(u64, cell_y) + 1,
         }),
 
         .sgr_pixels => {
@@ -792,4 +838,164 @@ test "motion is deduped by last cell except sgr pixels" {
         });
         try testing.expect(writer.buffered().len > 0);
     }
+}
+
+/// A size whose grid (60000 cells, below the u16 limit of a column) is large enough that a surface position over cell
+/// (col, row) maps to that cell with no clamping. The cell is one pixel.
+fn wideSize() renderer_size.Size {
+    return .{
+        .screen = .{ .width = 60_000, .height = 60_000 },
+        .cell = .{ .width = 1, .height = 1 },
+        .padding = .{},
+    };
+}
+
+/// The pixel position that lies in the middle of a cell of `wideSize`.
+fn cellCenter(col: u32, row: u32) Event.Pos {
+    return .{
+        .x = @as(f32, @floatFromInt(col)) + 0.5,
+        .y = @as(f32, @floatFromInt(row)) + 0.5,
+    };
+}
+
+fn encodeToBuf(buf: []u8, event: Event, opts: Options) ![]const u8 {
+    var writer: std.Io.Writer = .fixed(buf);
+    try encode(&writer, event, opts);
+    return writer.buffered();
+}
+
+test "cell: a supplied cell encodes like the pixel position over that cell" {
+    // The pixel path is the oracle for the cell path, for every format and
+    // action, at small and large coordinates.
+    const formats = [_]terminal.MouseFormat{ .x10, .utf8, .sgr, .urxvt };
+    const actions = [_]mouse.Action{ .press, .release, .motion };
+    const cells = [_]Event.Cell{
+        .{ .col = 0, .row = 0 },
+        .{ .col = 5, .row = 7 },
+        .{ .col = 222, .row = 100 },
+    };
+    for (formats) |format| {
+        for (actions) |action| {
+            for (cells) |cell| {
+                var buf_a: [64]u8 = undefined;
+                var buf_b: [64]u8 = undefined;
+                const opts: Options = .{ .event = .any, .format = format, .size = wideSize(), .any_button_pressed = true };
+                const by_cell = try encodeToBuf(&buf_a, .{
+                    .action = action,
+                    .button = .left,
+                    .cell = cell,
+                }, opts);
+                const by_pixel = try encodeToBuf(&buf_b, .{
+                    .action = action,
+                    .button = .left,
+                    .pos = cellCenter(cell.col, cell.row),
+                }, opts);
+                try testing.expect(by_pixel.len > 0);
+                try testing.expectEqualSlices(u8, by_pixel, by_cell);
+            }
+        }
+    }
+}
+
+test "cell: a cell outside the grid is reported as given, with no clamping" {
+    // The grid of this size is small, so the pixel path would clamp.
+    const small: renderer_size.Size = .{
+        .screen = .{ .width = 100, .height = 100 },
+        .cell = .{ .width = 10, .height = 10 },
+        .padding = .{},
+    };
+    const outside: Event.Cell = .{ .col = 5000, .row = 4000 };
+
+    // For each action, including a release: the cell is the one given.
+    for ([_]mouse.Action{ .press, .release, .motion }) |action| {
+        var buf_a: [64]u8 = undefined;
+        var buf_b: [64]u8 = undefined;
+        const by_cell = try encodeToBuf(&buf_a, .{
+            .action = action,
+            .button = .left,
+            .cell = outside,
+        }, .{ .event = .any, .format = .sgr, .size = small, .any_button_pressed = true });
+        const by_pixel = try encodeToBuf(&buf_b, .{
+            .action = action,
+            .button = .left,
+            .pos = cellCenter(outside.col, outside.row),
+        }, .{ .event = .any, .format = .sgr, .size = wideSize(), .any_button_pressed = true });
+        try testing.expect(by_cell.len > 0);
+        try testing.expectEqualSlices(u8, by_pixel, by_cell);
+    }
+
+    // Without a cell the same release is clamped by the pixel path: the
+    // clamped cell differs from the given one.
+    var buf_c: [64]u8 = undefined;
+    var buf_d: [64]u8 = undefined;
+    const clamped = try encodeToBuf(&buf_c, .{
+        .action = .release,
+        .button = .left,
+        .pos = cellCenter(outside.col, outside.row),
+    }, .{ .event = .any, .format = .sgr, .size = small });
+    const given = try encodeToBuf(&buf_d, .{
+        .action = .release,
+        .button = .left,
+        .cell = outside,
+    }, .{ .event = .any, .format = .sgr, .size = small });
+    try testing.expect(!std.mem.eql(u8, clamped, given));
+}
+
+test "cell: a cell that the format cannot express produces no output" {
+    var buf: [64]u8 = undefined;
+
+    // X10: the last cell is 222.
+    {
+        const opts: Options = .{ .event = .any, .format = .x10, .size = wideSize() };
+        try testing.expect((try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = 222, .row = 0 } }, opts)).len > 0);
+        try testing.expectEqual(@as(usize, 0), (try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = 223, .row = 0 } }, opts)).len);
+        try testing.expectEqual(@as(usize, 0), (try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = 0, .row = 223 } }, opts)).len);
+    }
+
+    // UTF-8: two bytes per coordinate, so the last cell is 2014.
+    {
+        const opts: Options = .{ .event = .any, .format = .utf8, .size = wideSize() };
+        try testing.expect((try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = 2014, .row = 2014 } }, opts)).len > 0);
+        try testing.expectEqual(@as(usize, 0), (try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = 2015, .row = 0 } }, opts)).len);
+        try testing.expectEqual(@as(usize, 0), (try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = 0, .row = 2015 } }, opts)).len);
+    }
+
+    // SGR and URXVT have no limit, and the largest cell does not overflow.
+    for ([_]terminal.MouseFormat{ .sgr, .urxvt }) |format| {
+        const opts: Options = .{ .event = .any, .format = format, .size = wideSize() };
+        const max = std.math.maxInt(u32);
+        try testing.expect((try encodeToBuf(&buf, .{ .button = .left, .cell = .{ .col = max, .row = max } }, opts)).len > 0);
+    }
+}
+
+test "cell: motion deduplication follows the supplied cell" {
+    var last: ?point.Coordinate = null;
+    const opts: Options = .{ .event = .any, .format = .sgr, .size = wideSize(), .last_cell = &last };
+    var buf: [64]u8 = undefined;
+
+    const first = try encodeToBuf(&buf, .{ .action = .motion, .cell = .{ .col = 3, .row = 4 } }, opts);
+    try testing.expect(first.len > 0);
+
+    // The same cell again: nothing.
+    try testing.expectEqual(@as(usize, 0), (try encodeToBuf(&buf, .{ .action = .motion, .cell = .{ .col = 3, .row = 4 } }, opts)).len);
+
+    // A different cell: reported.
+    try testing.expect((try encodeToBuf(&buf, .{ .action = .motion, .cell = .{ .col = 4, .row = 4 } }, opts)).len > 0);
+}
+
+test "cell: SGR pixels ignores the cell and reports the pixel position" {
+    const opts: Options = .{ .event = .any, .format = .sgr_pixels, .size = wideSize() };
+    var buf_a: [64]u8 = undefined;
+    var buf_b: [64]u8 = undefined;
+    const with_cell = try encodeToBuf(&buf_a, .{
+        .button = .left,
+        .pos = .{ .x = 41, .y = 17 },
+        .cell = .{ .col = 9, .row = 9 },
+    }, opts);
+    const without_cell = try encodeToBuf(&buf_b, .{
+        .button = .left,
+        .pos = .{ .x = 41, .y = 17 },
+    }, opts);
+    try testing.expect(with_cell.len > 0);
+    try testing.expectEqualSlices(u8, without_cell, with_cell);
 }
