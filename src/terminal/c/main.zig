@@ -39,6 +39,7 @@ pub const key_encode = @import("key_encode.zig");
 pub const mouse_event = @import("mouse_event.zig");
 pub const mouse_encode = @import("mouse_encode.zig");
 pub const paste = @import("paste.zig");
+pub const terminfo = @import("terminfo.zig");
 pub const row = @import("row.zig");
 pub const search = @import("search.zig");
 pub const sgr = @import("sgr.zig");
@@ -169,6 +170,9 @@ pub const paste_encode = paste.encode;
 pub const paste_frame = paste.frame;
 pub const terminal_paste = paste.terminal_paste;
 
+pub const terminfo_name = terminfo.name;
+pub const terminfo_source = terminfo.source;
+
 pub const alloc_alloc = allocator.alloc;
 pub const alloc_free = allocator.free;
 
@@ -287,6 +291,7 @@ test {
     _ = mouse_event;
     _ = mouse_encode;
     _ = paste;
+    _ = terminfo;
     _ = search;
     _ = sgr;
     _ = size_report;
