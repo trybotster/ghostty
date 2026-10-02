@@ -158,6 +158,75 @@ pub fn encode(
     return .success;
 }
 
+/// The marker frame of a paste, with no payload and no payload rewrite.
+///
+/// C: GhosttyPasteFrame
+pub const Frame = extern struct {
+    prefix: lib.String,
+    suffix: lib.String,
+};
+
+pub fn frame(bracketed: bool, out: ?*Frame) callconv(lib.calling_conv) void {
+    const dst = out orelse return;
+    dst.* = if (bracketed) .{
+        .prefix = .init(@as([]const u8, paste.bracketed_prefix)),
+        .suffix = .init(@as([]const u8, paste.bracketed_suffix)),
+    } else .{
+        .prefix = .init(@as([]const u8, "")),
+        .suffix = .init(@as([]const u8, "")),
+    };
+}
+
+test "frame bracketed matches the encoder on an empty payload" {
+    const testing = std.testing;
+    var f: Frame = undefined;
+    frame(true, &f);
+
+    // The encoder is the oracle for the marker bytes: an empty payload
+    // encodes to the prefix followed by the suffix.
+    var buf: [64]u8 = undefined;
+    var written: usize = 0;
+    try testing.expectEqual(Result.success, encode(null, 0, true, &buf, buf.len, &written));
+    try testing.expectEqual(f.prefix.len + f.suffix.len, written);
+    try testing.expectEqualSlices(u8, f.prefix.ptr[0..f.prefix.len], buf[0..f.prefix.len]);
+    try testing.expectEqualSlices(u8, f.suffix.ptr[0..f.suffix.len], buf[f.prefix.len..written]);
+}
+
+test "frame bracketed wraps a safe payload exactly as the encoder does" {
+    const testing = std.testing;
+    var f: Frame = undefined;
+    frame(true, &f);
+
+    const payload = "hello world";
+    var input = payload.*;
+    var buf: [64]u8 = undefined;
+    var written: usize = 0;
+    try testing.expectEqual(Result.success, encode(&input, input.len, true, &buf, buf.len, &written));
+
+    var framed: [64]u8 = undefined;
+    var len: usize = 0;
+    @memcpy(framed[len..][0..f.prefix.len], f.prefix.ptr[0..f.prefix.len]);
+    len += f.prefix.len;
+    @memcpy(framed[len..][0..payload.len], payload);
+    len += payload.len;
+    @memcpy(framed[len..][0..f.suffix.len], f.suffix.ptr[0..f.suffix.len]);
+    len += f.suffix.len;
+    try testing.expectEqualSlices(u8, buf[0..written], framed[0..len]);
+}
+
+test "frame unbracketed is empty and matches the encoder on an empty payload" {
+    const testing = std.testing;
+    var f: Frame = undefined;
+    frame(false, &f);
+    try testing.expectEqual(@as(usize, 0), f.prefix.len);
+    try testing.expectEqual(@as(usize, 0), f.suffix.len);
+
+    var buf: [8]u8 = undefined;
+    var written: usize = 99;
+    try testing.expectEqual(Result.success, encode(null, 0, false, &buf, buf.len, &written));
+    try testing.expectEqual(@as(usize, 0), written);
+}
+
 test "encode bracketed" {
     const testing = std.testing;
     const input = try testing.allocator.dupe(u8, "hello");

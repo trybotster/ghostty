@@ -246,6 +246,33 @@ GHOSTTY_API GhosttyResult ghostty_paste_encode(
     size_t buf_len,
     size_t* out_written);
 
+/**
+ * The marker frame that surrounds a paste.
+ *
+ * Both strings point to static data that stays valid for the life of
+ * the process. They are empty when no frame applies.
+ */
+typedef struct {
+  /** Bytes written before the payload. */
+  GhosttyString prefix;
+
+  /** Bytes written after the payload. */
+  GhosttyString suffix;
+} GhosttyPasteFrame;
+
+/**
+ * Get the bracketed paste markers, without touching any payload.
+ *
+ * ghostty_paste_encode() also replaces unsafe bytes and rewrites
+ * newlines. Use this function when the payload must reach the pty
+ * byte for byte and only the paste markers are wanted: write the
+ * prefix, the unchanged payload, and the suffix as one unit.
+ *
+ * @param bracketed Whether bracketed paste mode (2004) is active
+ * @param[out] out The frame (must not be NULL)
+ */
+GHOSTTY_API void ghostty_paste_frame(bool bracketed, GhosttyPasteFrame* out);
+
 #ifdef __cplusplus
 }
 #endif
