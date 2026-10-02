@@ -118,6 +118,13 @@ pub const DecodeOptions = struct {
     /// The snapshot format is unchanged, so this works with any snapshot.
     /// It has no effect on platforms that do not support compression.
     compress_history: bool = false,
+
+    /// The total Kitty image storage limit, in bytes, of every restored
+    /// screen. A snapshot holds no images and no limit, so without this the
+    /// restored screens take the library default. A host that turned image
+    /// storage off (zero) sets it here, so that the restored terminal ignores
+    /// image sequences as the original did.
+    kitty_image_storage_limit: ?usize = null,
 };
 
 /// One decoded Terminal and the bytes needed to resume its Stream.
@@ -332,7 +339,7 @@ pub const Decoder = struct {
             const primary = result.screens.get(.primary).?;
             const explicit_bytes = primary.pages.limits.bytes.explicit;
             const explicit_lines = primary.pages.limits.lines.explicit;
-            break :options .{
+            var screen_opts: TerminalScreen.Options = .{
                 .cols = result.cols,
                 .rows = result.rows,
                 .max_scrollback_bytes = if (explicit_bytes == std.math.maxInt(usize))
@@ -344,6 +351,10 @@ pub const Decoder = struct {
                 else
                     explicit_lines,
             };
+            if (options.kitty_image_storage_limit) |limit| {
+                screen_opts.kitty_image_storage_limit = limit;
+            }
+            break :options screen_opts;
         };
 
         var routed: std.EnumSet(TerminalScreenKey) = .initEmpty();
