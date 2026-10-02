@@ -157,6 +157,9 @@ pub const mouse_event_set_mods = mouse_event.set_mods;
 pub const mouse_event_get_mods = mouse_event.get_mods;
 pub const mouse_event_set_position = mouse_event.set_position;
 pub const mouse_event_get_position = mouse_event.get_position;
+pub const mouse_event_set_cell = mouse_event.set_cell;
+pub const mouse_event_clear_cell = mouse_event.clear_cell;
+pub const mouse_event_get_cell = mouse_event.get_cell;
 
 pub const mouse_encoder_new = mouse_encode.new;
 pub const mouse_encoder_free = mouse_encode.free;

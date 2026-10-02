@@ -2779,6 +2779,29 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Output type: GhosttyTerminalMemoryUsage *
    */
   GHOSTTY_TERMINAL_DATA_MEMORY_USAGE = 42,
+
+  /**
+   * The active mouse tracking mode.
+   *
+   * This is the mode that the last tracking command selected (DEC modes 9,
+   * 1000, 1002 and 1003), or none after it was turned off. The individual
+   * mode bits (GHOSTTY_TERMINAL_DATA_MODE) cannot give this value: enabling
+   * 1000 and then 1003 gives the same bits as 1003 and then 1000, and the
+   * active modes differ.
+   *
+   * Output type: GhosttyMouseTrackingMode *
+   */
+  GHOSTTY_TERMINAL_DATA_MOUSE_EVENT = 43,
+
+  /**
+   * The active mouse report format.
+   *
+   * This is the format that the last format command selected (DEC modes 1005,
+   * 1006, 1015 and 1016), or X10 after it was turned off.
+   *
+   * Output type: GhosttyMouseFormat *
+   */
+  GHOSTTY_TERMINAL_DATA_MOUSE_FORMAT = 44,
   GHOSTTY_TERMINAL_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalData;
 

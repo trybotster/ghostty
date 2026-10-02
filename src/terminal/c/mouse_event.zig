@@ -28,6 +28,9 @@ pub const Button = mouse.Button;
 /// C: GhosttyMousePosition
 pub const Position = mouse_encode.Event.Pos;
 
+/// C: GhosttyMouseCell
+pub const Cell = mouse_encode.Event.Cell;
+
 /// C: GhosttyMods
 pub const Mods = key.Mods;
 
@@ -104,6 +107,23 @@ pub fn get_position(event_: Event) callconv(lib.calling_conv) Position {
     return event_.?.event.pos;
 }
 
+pub fn set_cell(event_: Event, cell: Cell) callconv(lib.calling_conv) void {
+    event_.?.event.cell = cell;
+}
+
+pub fn clear_cell(event_: Event) callconv(lib.calling_conv) void {
+    event_.?.event.cell = null;
+}
+
+pub fn get_cell(event_: Event, out: ?*Cell) callconv(lib.calling_conv) bool {
+    if (event_.?.event.cell) |cell| {
+        if (out) |ptr| ptr.* = cell;
+        return true;
+    }
+
+    return false;
+}
+
 test "alloc" {
     var e: Event = undefined;
     try testing.expectEqual(Result.success, new(
@@ -152,4 +172,23 @@ test "set/get" {
     const pos = get_position(e);
     try testing.expectEqual(@as(f32, 12.5), pos.x);
     try testing.expectEqual(@as(f32, -4.0), pos.y);
+}
+
+test "cell set/get/clear" {
+    var e: Event = undefined;
+    try testing.expectEqual(Result.success, new(&lib.alloc.test_allocator, &e));
+    defer free(e);
+
+    // An event starts with no cell.
+    var cell: Cell = .{ .col = 0, .row = 0 };
+    try testing.expect(!get_cell(e, &cell));
+
+    set_cell(e, .{ .col = 12, .row = 3 });
+    try testing.expect(get_cell(e, &cell));
+    try testing.expectEqual(@as(u32, 12), cell.col);
+    try testing.expectEqual(@as(u32, 3), cell.row);
+    try testing.expect(get_cell(e, null));
+
+    clear_cell(e);
+    try testing.expect(!get_cell(e, &cell));
 }
