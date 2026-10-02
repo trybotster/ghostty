@@ -135,6 +135,8 @@ pub const keys = keys: {
     result.set(.numpad_subtract, kpKeys("m", "-"));
     result.set(.numpad_add, kpKeys("k", "+"));
     result.set(.numpad_enter, kpKeys("M", "\r"));
+    // xterm sends SS3 X for the keypad equals key in application keypad mode.
+    result.set(.numpad_equal, kpKeys("X", "="));
     result.set(.numpad_up, pcStyle("\x1b[1;{}A") ++ cursorKey("\x1b[A", "\x1bOA"));
     result.set(.numpad_down, pcStyle("\x1b[1;{}B") ++ cursorKey("\x1b[B", "\x1bOB"));
     result.set(.numpad_right, pcStyle("\x1b[1;{}C") ++ cursorKey("\x1b[C", "\x1bOC"));
