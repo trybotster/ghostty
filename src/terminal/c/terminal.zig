@@ -247,8 +247,9 @@ pub const QueryKind = Handler.Query;
 pub const Query = extern struct {
     size: usize,
     kind: QueryKind,
-    /// The exact bytes of the query sequence, from its first byte to its
-    /// final byte, when `request_available` is true. Empty otherwise.
+    /// The bytes of the recognized query sequence (R-17): from its first
+    /// byte to its final byte, without C0 controls that the terminal executes
+    /// inside it, when `request_available` is true. Empty otherwise.
     request: lib.String,
     /// True when the bytes were fed through `vt_write_until_query`.
     request_available: bool,
@@ -1096,8 +1097,9 @@ fn c1Introducer(c: u8) bool {
 /// Feed `input` up to and including the byte that completes the first query
 /// sequence, or all of it when no query completes.
 ///
-/// The `query` effect runs inside this call, once, with the exact bytes of
-/// the sequence from its first byte to its final byte. A query is any
+/// The `query` effect runs inside this call, once, with the bytes of the
+/// recognized sequence from its first byte to its final byte, without C0
+/// controls that the terminal executes inside it (R-17). A query is any
 /// sequence that expects a reply (see `GhosttyTerminalQueryKind`).
 pub fn vt_write_until_query(
     terminal_: Terminal,
@@ -1191,6 +1193,18 @@ pub fn vt_write_until_query(
             continue;
         }
 
+        // A C0 control other than ESC, CAN and SUB executes on its own
+        // inside an unfinished sequence and leaves the sequence pending
+        // (R-17). It is not one of the sequence's bytes. The stream still
+        // sees it, so its effect (a bell, for example) is kept.
+        if (!stream.ground() and !stringState(old) and c < 0x20 and
+            c != 0x1b and c != 0x18 and c != 0x1a)
+        {
+            stream.next(c);
+            i += 1;
+            continue;
+        }
+
         // An ESC outside a string sequence abandons the sequence in
         // progress and starts a new one.
         if (c == 0x1b and !stringState(old)) raw.clear();
@@ -1217,7 +1231,7 @@ pub fn vt_write_until_query(
         // into a new sequence starts a new run too. The effect already ran.
         const after = stream.parser.state;
         if ((c == 0x1b and stringState(old) and !st and after == .escape) or
-            (c1Introducer(c) and entryState(after) and after != old))
+            (c1Introducer(c) and entryState(after) and !stringState(old)))
         {
             raw.clear();
             raw.append(alloc, c);
@@ -7545,7 +7559,9 @@ test "vt_write_until_query does not count an abandoned prefix against the limit"
     );
     try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
     try testing.expect(!QueryProbe.truncated);
-    try testing.expectEqualSlices(u8, "\x1b[5n", QueryProbe.raw[0..QueryProbe.raw_len]);
+    // The second query's bytes are the tail of the input after the second ESC.
+    const second = std.mem.lastIndexOfScalar(u8, input, 0x1b).?;
+    try testing.expectEqualSlices(u8, input[second..], QueryProbe.raw[0..QueryProbe.raw_len]);
 }
 
 test "vt_write_until_query reports ENQ inside a CSI alone and keeps the CSI pending" {
@@ -7682,4 +7698,88 @@ test "QueryRaw stops at its limit" {
     try testing.expect(!raw.truncated);
     for ("abc") |c| raw.append(testing.allocator, c);
     try testing.expect(!raw.truncated);
+}
+
+test "vt_write_until_query reports ENQ inside a CSI and the CSI as two queries (R-17)" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // ESC [ ENQ 5 n: the ENQ executes inside the CSI, and the CSI is a
+    // status query once it completes.
+    const input = "\x1b[\x055n";
+    var kinds: [4]QueryKind = undefined;
+    var raws: [4][8]u8 = undefined;
+    var raw_lens: [4]usize = undefined;
+    var n: usize = 0;
+
+    var offset: usize = 0;
+    while (offset < input.len) {
+        QueryProbe.reset();
+        var consumed: usize = 0;
+        const rest = input[offset..];
+        const result = vt_write_until_query(t, rest.ptr, rest.len, &consumed);
+        offset += consumed;
+        if (result != .success) break;
+        try testing.expectEqual(@as(usize, 1), QueryProbe.count);
+        kinds[n] = QueryProbe.kind;
+        raw_lens[n] = QueryProbe.raw_len;
+        @memcpy(raws[n][0..QueryProbe.raw_len], QueryProbe.raw[0..QueryProbe.raw_len]);
+        n += 1;
+    }
+
+    try testing.expectEqual(input.len, offset);
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqual(QueryKind.enquiry, kinds[0]);
+    try testing.expectEqualSlices(u8, input[2..3], raws[0][0..raw_lens[0]]);
+    try testing.expectEqual(QueryKind.operating_status, kinds[1]);
+    // The CSI without the executed ENQ.
+    try testing.expectEqualSlices(u8, input[0..2], raws[1][0..2]);
+    try testing.expectEqualSlices(u8, input[3..5], raws[1][2..raw_lens[1]]);
+    try testing.expectEqual(@as(usize, 4), raw_lens[1]);
+}
+
+test "vt_write_until_query restarts at a C1 CSI introducer inside a CSI" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // ESC [ then the C1 CSI introducer: the introducer abandons the first
+    // CSI and starts a new one, although the parser is in csi_entry before
+    // and after it.
+    const input = "\x1b[\x9b5n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expectEqualSlices(u8, input[2..], QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query leaves a BEL inside a CSI out of the request but keeps its effect" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const S = struct {
+        var bells: usize = 0;
+        fn bell(_: Terminal, _: ?*anyopaque) callconv(lib.calling_conv) void {
+            bells += 1;
+        }
+    };
+    S.bells = 0;
+    try testing.expectEqual(Result.success, set(t, .bell, @ptrCast(&S.bell)));
+
+    // ESC [ 5 BEL n: the BEL executes inside the CSI.
+    const input = "\x1b[5\x07n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expectEqual(@as(usize, 1), S.bells);
+    try testing.expectEqual(@as(usize, 4), QueryProbe.raw_len);
+    try testing.expectEqualSlices(u8, input[0..3], QueryProbe.raw[0..3]);
+    try testing.expectEqual(input[4], QueryProbe.raw[3]);
 }
