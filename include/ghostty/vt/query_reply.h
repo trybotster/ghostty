@@ -92,11 +92,11 @@ typedef struct {
   /** CHARS_SCREEN: the number of columns. */
   uint32_t cols;
 
-  /** WINDOW_POSITION: the horizontal position. */
-  int32_t x;
+  /** WINDOW_POSITION: the horizontal position, 0 to 65535 as on the wire. */
+  uint16_t x;
 
-  /** WINDOW_POSITION: the vertical position. */
-  int32_t y;
+  /** WINDOW_POSITION: the vertical position, 0 to 65535 as on the wire. */
+  uint16_t y;
 
   /** WINDOW_STATE: whether the window is iconified. */
   bool iconified;
@@ -129,7 +129,8 @@ typedef struct {
  * @param[out] out_written The bytes written, or the bytes needed when the
  *             result is GHOSTTY_OUT_OF_SPACE (must not be NULL)
  * @return GHOSTTY_SUCCESS, GHOSTTY_OUT_OF_SPACE if the buffer is too small,
- *         or GHOSTTY_INVALID_VALUE for a bad kind, field, size or argument
+ *         or GHOSTTY_INVALID_VALUE for a bad kind, terminator or bool value, a
+ *         bad field, a size that is too small, or a bad argument
  */
 GHOSTTY_API GhosttyResult ghostty_query_reply_encode(
     const GhosttyQueryReply* reply,
