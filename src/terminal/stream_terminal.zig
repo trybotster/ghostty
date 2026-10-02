@@ -397,6 +397,11 @@ pub const Handler = struct {
         // OSC 52 and OSC 5522 clipboard reads.
         "clipboard_read",
         "kitty_clipboard_read",
+
+        // CSI 14 ; 2 t (window size in pixels) and CSI 13 ; 2 t (text area
+        // position). libghostty has no reply for either.
+        "size_csi_14_2_t",
+        "size_csi_13_2_t",
     });
 
     /// A sequence this library does not implement, passed to the
@@ -854,6 +859,8 @@ pub const Handler = struct {
                     .csi_15_t => .size_csi_15_t,
                     .csi_19_t => .size_csi_19_t,
                     .csi_20_t => .size_csi_20_t,
+                    .csi_14_2_t => .size_csi_14_2_t,
+                    .csi_13_2_t => .size_csi_13_2_t,
                 });
                 self.reportSize(value);
             },
@@ -1852,7 +1859,14 @@ pub const Handler = struct {
         switch (style) {
             // This library has no answer for these. The embedder saw the
             // query through the `query` effect.
-            .csi_11_t, .csi_13_t, .csi_15_t, .csi_19_t, .csi_20_t => return,
+            .csi_11_t,
+            .csi_13_t,
+            .csi_15_t,
+            .csi_19_t,
+            .csi_20_t,
+            .csi_14_2_t,
+            .csi_13_2_t,
+            => return,
 
             .csi_21_t => {
                 if (!self.title_report) return;

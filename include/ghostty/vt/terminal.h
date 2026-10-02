@@ -1105,7 +1105,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_TERMINAL_QUERY_MODE_REPORT = 10,
   /** CSI > q. */
   GHOSTTY_TERMINAL_QUERY_XTVERSION = 11,
-  /** CSI 14 t. */
+  /** CSI 14 t (text area size in pixels). */
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_14_T = 12,
   /** CSI 16 t. */
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_16_T = 13,
@@ -1113,9 +1113,9 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_18_T = 14,
   /** CSI 21 t. */
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_21_T = 15,
-  /** CSI 11 t. libghostty-vt has no reply. */
+  /** CSI 11 t (window state). libghostty-vt has no reply. */
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_11_T = 16,
-  /** CSI 13 t. libghostty-vt has no reply. */
+  /** CSI 13 t (window position). libghostty-vt has no reply. */
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_13_T = 17,
   /** CSI 15 t. libghostty-vt has no reply. */
   GHOSTTY_TERMINAL_QUERY_SIZE_CSI_15_T = 18,
@@ -1135,6 +1135,10 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_TERMINAL_QUERY_CLIPBOARD_READ = 25,
   /** OSC 5522 clipboard read. */
   GHOSTTY_TERMINAL_QUERY_KITTY_CLIPBOARD_READ = 26,
+  /** CSI 14 ; 2 t (window size in pixels). libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_14_2_T = 27,
+  /** CSI 13 ; 2 t (text area position). libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_13_2_T = 28,
   GHOSTTY_TERMINAL_QUERY_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalQueryKind;
 
