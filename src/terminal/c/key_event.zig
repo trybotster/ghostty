@@ -11,7 +11,9 @@ const log = std.log.scoped(.key_event);
 /// The UTF-8 text is not owned by this wrapper - the caller is responsible
 /// for ensuring the lifetime of any UTF-8 text set via set_utf8.
 const KeyEventWrapper = struct {
-    event: key.KeyEvent = .{},
+    // The C API never derives the kitty alternate keys: the caller supplies
+    // them (or omits them) with set_shifted_key and set_base_layout_key.
+    event: key.KeyEvent = .{ .alternates = .{ .provided = .{} } },
     alloc: Allocator,
 };
 
@@ -119,6 +121,26 @@ pub fn set_unshifted_codepoint(event_: Event, codepoint: u32) callconv(lib.calli
 pub fn get_unshifted_codepoint(event_: Event) callconv(lib.calling_conv) u32 {
     const event: *key.KeyEvent = &event_.?.event;
     return event.unshifted_codepoint;
+}
+
+pub fn set_shifted_key(event_: Event, codepoint: u32) callconv(lib.calling_conv) void {
+    const event: *key.KeyEvent = &event_.?.event;
+    event.alternates.provided.shifted = @truncate(codepoint);
+}
+
+pub fn get_shifted_key(event_: Event) callconv(lib.calling_conv) u32 {
+    const event: *key.KeyEvent = &event_.?.event;
+    return event.alternates.provided.shifted;
+}
+
+pub fn set_base_layout_key(event_: Event, codepoint: u32) callconv(lib.calling_conv) void {
+    const event: *key.KeyEvent = &event_.?.event;
+    event.alternates.provided.base_layout = @truncate(codepoint);
+}
+
+pub fn get_base_layout_key(event_: Event) callconv(lib.calling_conv) u32 {
+    const event: *key.KeyEvent = &event_.?.event;
+    return event.alternates.provided.base_layout;
 }
 
 test "alloc" {
@@ -265,4 +287,39 @@ test "complete key event" {
     try testing.expect(got_utf8 != null);
     try testing.expectEqual(@as(usize, 1), utf8_len);
     try testing.expectEqualStrings("A", got_utf8.?[0..utf8_len]);
+}
+
+test "alternate keys start empty and round trip" {
+    const testing = std.testing;
+    var e: Event = undefined;
+    try testing.expectEqual(Result.success, new(&lib.alloc.test_allocator, &e));
+    defer free(e);
+
+    // The C API supplies the alternate keys. It never derives them.
+    try testing.expect(e.?.event.alternates == .provided);
+    try testing.expectEqual(@as(u32, 0), get_shifted_key(e));
+    try testing.expectEqual(@as(u32, 0), get_base_layout_key(e));
+
+    set_shifted_key(e, 'A');
+    set_base_layout_key(e, 'q');
+    try testing.expectEqual(@as(u32, 'A'), get_shifted_key(e));
+    try testing.expectEqual(@as(u32, 'q'), get_base_layout_key(e));
+    try testing.expectEqual(@as(u21, 'A'), e.?.event.alternates.provided.shifted);
+}
+
+test "hyper and meta mods round trip through the C bits" {
+    const testing = std.testing;
+    var e: Event = undefined;
+    try testing.expectEqual(Result.success, new(&lib.alloc.test_allocator, &e));
+    defer free(e);
+
+    // GHOSTTY_MODS_HYPER is 1 << 10 and GHOSTTY_MODS_META is 1 << 11.
+    const hyper: u16 = 1 << 10;
+    const meta: u16 = 1 << 11;
+    set_mods(e, @bitCast(hyper | meta));
+    const mods = get_mods(e);
+    try testing.expect(mods.hyper);
+    try testing.expect(mods.meta);
+    try testing.expect(!mods.shift);
+    try testing.expectEqual(hyper | meta, mods.int());
 }

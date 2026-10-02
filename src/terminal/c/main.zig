@@ -134,6 +134,10 @@ pub const key_event_set_utf8 = key_event.set_utf8;
 pub const key_event_get_utf8 = key_event.get_utf8;
 pub const key_event_set_unshifted_codepoint = key_event.set_unshifted_codepoint;
 pub const key_event_get_unshifted_codepoint = key_event.get_unshifted_codepoint;
+pub const key_event_set_shifted_key = key_event.set_shifted_key;
+pub const key_event_get_shifted_key = key_event.get_shifted_key;
+pub const key_event_set_base_layout_key = key_event.set_base_layout_key;
+pub const key_event_get_base_layout_key = key_event.get_base_layout_key;
 
 pub const key_encoder_new = key_encode.new;
 pub const key_encoder_free = key_encode.free;
