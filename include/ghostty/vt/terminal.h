@@ -1059,6 +1059,20 @@ typedef void (*GhosttyTerminalClipboardReadFn)(
     const GhosttyClipboardRead* read);
 
 /**
+ * Which sequence requested a desktop notification.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** OSC 9. The title is always empty. */
+  GHOSTTY_TERMINAL_NOTIFICATION_SOURCE_OSC9 = 0,
+
+  /** OSC 777 with the `notify` extension. */
+  GHOSTTY_TERMINAL_NOTIFICATION_SOURCE_OSC777 = 1,
+  GHOSTTY_TERMINAL_NOTIFICATION_SOURCE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalNotificationSource;
+
+/**
  * A request to show a desktop notification.
  *
  * This is a sized struct. The callback must only access fields present in the
@@ -1076,6 +1090,9 @@ typedef struct {
 
   /** Notification body. */
   GhosttyString body;
+
+  /** The sequence that requested the notification. */
+  GhosttyTerminalNotificationSource source;
 } GhosttyTerminalDesktopNotification;
 
 /**

@@ -23,6 +23,17 @@ pub const program_status = parsers.program_status;
 
 const log = std.log.scoped(.osc);
 
+/// Which sequence requested a desktop notification.
+///
+/// C: GhosttyTerminalNotificationSource
+pub const DesktopNotificationSource = LibEnum(lib.target, &.{
+    // OSC 9: the body only; the title is always empty.
+    "osc9",
+
+    // OSC 777 with the `notify` extension: a title and a body.
+    "osc777",
+});
+
 pub const Command = union(Key) {
     /// This generally shouldn't ever be set except as an initial zero value.
     /// Ignore it.
@@ -97,6 +108,7 @@ pub const Command = union(Key) {
     show_desktop_notification: struct {
         title: [:0]const u8,
         body: [:0]const u8,
+        source: DesktopNotificationSource,
     },
 
     /// Start a hyperlink (OSC 8)
