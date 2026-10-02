@@ -1,4 +1,5 @@
 const std = @import("std");
+const osc = @import("osc.zig");
 
 /// The clipboard destination for a write.
 pub const Location = enum(c_int) {
@@ -83,6 +84,14 @@ pub const Write = struct {
     location: Location,
     contents: []const Content,
 
+    /// The selection of an OSC 52 write exactly as the program wrote it:
+    /// empty when it was left out. Empty for the other protocols. `location`
+    /// is a coarser mapping of the same character.
+    selection: []const u8 = "",
+
+    /// The terminator that the request used. The other protocols report ST.
+    terminator: osc.Terminator = .st,
+
     /// Name of the writing program for permission prompts, if the
     /// protocol carries one. Empty otherwise.
     name: []const u8,
@@ -155,6 +164,15 @@ pub const Write = struct {
 /// it has an answer; the VT stream waits with it.
 pub const Read = struct {
     location: Location,
+
+    /// The selection of an OSC 52 read exactly as the program wrote it:
+    /// empty when it was left out. Empty for the other protocols.
+    /// `location` is a coarser mapping of the same character.
+    selection: []const u8 = "",
+
+    /// The terminator that the request used. The reply to the program uses
+    /// the same one. The other protocols report ST.
+    terminator: osc.Terminator = .st,
 
     /// The MIME types the program wants, in order of preference. The
     /// reply should carry every requested representation the clipboard
