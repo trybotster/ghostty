@@ -2695,10 +2695,19 @@ pub fn startHyperlink(
     uri: []const u8,
     id_: ?[]const u8,
 ) PageList.IncreaseCapacityError!void {
+    // The retry loop below reuses `link` after startHyperlinkOnce has ended
+    // the current hyperlink. The caller's slices are allowed to reference
+    // that hyperlink (see "hyperlink accepts its current values"), so they
+    // may be freed after the first attempt. Own a copy for the whole loop.
+    const uri_owned = try self.alloc.dupe(u8, uri);
+    defer self.alloc.free(uri_owned);
+    const id_owned: ?[]u8 = if (id_) |id| try self.alloc.dupe(u8, id) else null;
+    defer if (id_owned) |id| self.alloc.free(id);
+
     // Create our pending entry.
     const link: hyperlink.Hyperlink = .{
-        .uri = uri,
-        .id = if (id_) |id| .{
+        .uri = uri_owned,
+        .id = if (id_owned) |id| .{
             .explicit = id,
         } else implicit: {
             defer self.cursor.hyperlink_implicit_id +%= 1;
@@ -11306,6 +11315,48 @@ test "Screen: hyperlink start/end" {
         const page = s.cursor.page_pin.node.page();
         try testing.expectEqual(0, page.hyperlink_set.count());
     }
+}
+
+test "Screen: hyperlink accepts its current values across capacity growth" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var s = try init(io, alloc, .{ .cols = 5, .rows = 5, .max_scrollback_bytes = 0 });
+    defer s.deinit();
+
+    // Compact the page so it holds no spare string or hyperlink capacity,
+    // then reload the cursor since its cached pointers point into the
+    // replaced page.
+    {
+        const node = (try s.pages.compact(s.cursor.page_pin.node)).?;
+        try testing.expectEqual(0, node.capacity().string_bytes);
+        s.cursorReload();
+    }
+
+    // Restart the hyperlink from slices of the current one, with a shorter
+    // id each time. Every restart is a new entry and needs new string
+    // bytes, so the string table fills and a restart has to grow the page
+    // and retry the insert. startHyperlinkOnce frees the old cursor
+    // hyperlink before the retry, so the retry must not read the caller's
+    // slices of it.
+    const uri = "http://example.com/" ++ "u" ** 45;
+    const id = "i" ** 200;
+    try s.startHyperlink(uri, id);
+    var grew = false;
+    var n: usize = id.len - 1;
+    while (n > 0) : (n -= 1) {
+        const current = s.cursor.hyperlink.?;
+        const before = s.cursor.page_pin.node.capacity().string_bytes;
+        try s.startHyperlink(current.uri, current.id.explicit[0..n]);
+        // A cell that uses the hyperlink keeps its string table entry alive,
+        // so the table fills instead of reusing dead entries.
+        try s.testWriteString("x");
+        if (s.cursor.page_pin.node.capacity().string_bytes > before) grew = true;
+        try testing.expectEqualStrings(uri, s.cursor.hyperlink.?.uri);
+        try testing.expectEqualStrings(id[0..n], s.cursor.hyperlink.?.id.explicit);
+    }
+    try testing.expect(grew);
 }
 
 test "Screen: hyperlink accepts its current values" {
