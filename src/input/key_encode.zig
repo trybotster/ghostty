@@ -2598,6 +2598,29 @@ test "legacy: keypad 1 with application keypad" {
     try testing.expectEqualStrings("\x1bOq", writer.buffered());
 }
 
+test "legacy: keypad equal in numeric and application keypad mode" {
+    var buf: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .numpad_equal,
+        .mods = .{},
+        .consumed_mods = .{},
+        .utf8 = "",
+    }, .{});
+    try testing.expectEqualStrings("=", writer.buffered());
+
+    writer = .fixed(&buf);
+    try legacy(&writer, .{
+        .key = .numpad_equal,
+        .mods = .{},
+        .consumed_mods = .{},
+        .utf8 = "",
+    }, .{
+        .keypad_key_application = true,
+    });
+    try testing.expectEqualStrings("\x1bOX", writer.buffered());
+}
+
 test "legacy: keypad 1 with application keypad and numlock" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
