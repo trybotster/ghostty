@@ -168,6 +168,7 @@ extern "C" {
 #include <ghostty/vt/selection.h>
 #include <ghostty/vt/size_report.h>
 #include <ghostty/vt/snapshot.h>
+#include <ghostty/vt/terminfo.h>
 #include <ghostty/vt/unicode.h>
 #include <ghostty/vt/wasm.h>
 
