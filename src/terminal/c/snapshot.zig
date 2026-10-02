@@ -24,6 +24,7 @@ pub const DecoderOption = enum(c_int) {
     max_continuation_bytes = 0,
     retain_continuation = 1,
     compress_history = 2,
+    kitty_image_storage_limit = 3,
     _,
 };
 
@@ -111,6 +112,7 @@ const DecoderWrapper = struct {
     max_continuation_bytes: usize,
     retain_continuation: bool,
     compress_history: bool,
+    kitty_image_storage_limit: ?usize,
 };
 
 /// C: GhosttySnapshotDecoder, an opaque nullable decoder handle.
@@ -175,6 +177,7 @@ fn decoderNewSource(
     wrapper.max_continuation_bytes = default_max_continuation_bytes;
     wrapper.retain_continuation = false;
     wrapper.compress_history = false;
+    wrapper.kitty_image_storage_limit = null;
     wrapper.decoder = .init(wrapper.source.reader());
     out.* = wrapper;
     return .success;
@@ -209,6 +212,8 @@ pub fn decoder_set(
             @as(*const bool, @ptrCast(@alignCast(value))).*,
         .compress_history => decoder.compress_history =
             @as(*const bool, @ptrCast(@alignCast(value))).*,
+        .kitty_image_storage_limit => decoder.kitty_image_storage_limit =
+            @intCast(@as(*const u64, @ptrCast(@alignCast(value))).*),
         _ => return .invalid_value,
     }
     return .success;
@@ -467,6 +472,7 @@ fn decoderReadyTerminal(decoder: *DecoderWrapper) anyerror!ReadyTerminal {
         .{
             .max_continuation_bytes = decoder.max_continuation_bytes,
             .compress_history = decoder.compress_history,
+            .kitty_image_storage_limit = decoder.kitty_image_storage_limit,
         },
     );
     defer decoded.deinit(decoder.alloc);
@@ -787,6 +793,71 @@ test "decoder option and empty source" {
         &terminal,
     ));
     try testing.expectEqual(null, terminal);
+}
+
+test "snapshot decoder applies the host's kitty image storage limit to every restored screen" {
+    var source: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &source,
+        20,
+        4,
+    ));
+    defer terminal_c.free(source);
+
+    // The host turns image storage off before any write, as a session does.
+    const off: u64 = 0;
+    try testing.expectEqual(Result.success, terminal_c.set(
+        source,
+        .kitty_image_storage_limit,
+        &off,
+    ));
+    // Enter the alternate screen once, so that the snapshot declares both screens.
+    terminal_c.vt_write(source, "text\x1b[?1049h\x1b[?1049l", "text\x1b[?1049h\x1b[?1049l".len);
+
+    var encoded_ptr: ?[*]u8 = null;
+    var encoded_len: usize = 0;
+    try testing.expectEqual(Result.success, encode_alloc(
+        source,
+        &lib.alloc.test_allocator,
+        &encoded_ptr,
+        &encoded_len,
+    ));
+    const encoded = encoded_ptr.?[0..encoded_len];
+    defer lib.alloc.default(&lib.alloc.test_allocator).free(encoded);
+
+    // Without the option, the restored screens take the library default.
+    {
+        var decoder: Decoder = null;
+        try testing.expectEqual(Result.success, decoder_new_buf(&lib.alloc.test_allocator, &decoder, encoded.ptr, encoded.len));
+        defer decoder_free(decoder);
+        var restored: terminal_c.Terminal = null;
+        try testing.expectEqual(Result.success, decoder_decode(decoder, &restored));
+        defer terminal_c.free(restored);
+        var limit: u64 = 0;
+        try testing.expectEqual(Result.success, terminal_c.get(restored, .kitty_image_storage_limit, &limit));
+        try testing.expect(limit != 0);
+    }
+
+    // With the option, every restored screen keeps the host's limit.
+    {
+        var decoder: Decoder = null;
+        try testing.expectEqual(Result.success, decoder_new_buf(&lib.alloc.test_allocator, &decoder, encoded.ptr, encoded.len));
+        defer decoder_free(decoder);
+        try testing.expectEqual(Result.success, decoder_set(decoder, .kitty_image_storage_limit, &off));
+        var restored: terminal_c.Terminal = null;
+        try testing.expectEqual(Result.success, decoder_decode(decoder, &restored));
+        defer terminal_c.free(restored);
+
+        var limit: u64 = 1;
+        try testing.expectEqual(Result.success, terminal_c.get(restored, .kitty_image_storage_limit, &limit));
+        try testing.expectEqual(@as(u64, 0), limit);
+        // The alternate screen too.
+        terminal_c.vt_write(restored, "\x1b[?1049h", "\x1b[?1049h".len);
+        limit = 1;
+        try testing.expectEqual(Result.success, terminal_c.get(restored, .kitty_image_storage_limit, &limit));
+        try testing.expectEqual(@as(u64, 0), limit);
+    }
 }
 
 test "snapshot C API full round trip restores continuation" {
