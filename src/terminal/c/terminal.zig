@@ -71,6 +71,54 @@ pub const Io = struct {
     }
 };
 
+/// The bytes of the run that `vt_write_until_query` is feeding: a sequence
+/// from its first byte to the byte that ends it. It holds a contiguous prefix
+/// of the run, never a run with missing bytes.
+const QueryRaw = struct {
+    bytes: std.ArrayListUnmanaged(u8) = .empty,
+    /// The most bytes that it keeps.
+    max: usize = default_query_max_bytes,
+    /// True once it stopped keeping bytes: the run is longer than `max`, or
+    /// a byte could not be kept. `bytes` is then a prefix of the run.
+    truncated: bool = false,
+    /// True while `vt_write_until_query` keeps bytes (the query effect then
+    /// reports them).
+    active: bool = false,
+    /// True when the run that is unfinished at the end of the last write has
+    /// all of its bytes in `bytes`, so a later `vt_write_until_query` can
+    /// continue it.
+    open: bool = false,
+    /// True when the current run began in a write that did not keep its
+    /// bytes, so `bytes` cannot hold the whole run.
+    lost: bool = false,
+
+    /// Start a new run.
+    fn clear(self: *QueryRaw) void {
+        self.bytes.clearRetainingCapacity();
+        self.truncated = false;
+        self.lost = false;
+    }
+
+    /// Keep one more byte of the run, unless it already stopped keeping
+    /// bytes. After the first byte that cannot be kept, no later byte is
+    /// kept, so `bytes` stays a prefix of the run.
+    fn append(self: *QueryRaw, alloc: std.mem.Allocator, c: u8) void {
+        if (self.truncated) return;
+        if (self.bytes.items.len >= self.max) {
+            self.truncated = true;
+            return;
+        }
+        self.bytes.append(alloc, c) catch {
+            self.truncated = true;
+        };
+    }
+
+    /// Whether the effect may report `bytes` as the request.
+    fn available(self: *const QueryRaw) bool {
+        return self.active and !self.lost;
+    }
+};
+
 /// Wrapper around ZigTerminal that tracks additional state for C API usage,
 /// such as the persistent VT stream needed to handle escape sequences split
 /// across multiple vt_write calls.
@@ -88,22 +136,8 @@ const TerminalWrapper = struct {
     terminfo_name_buf: [Handler.max_terminfo_name_bytes]u8,
     stream: Stream,
     effects: Effects = .{},
-    /// The raw bytes of the sequence that `vt_write_until_query` is
-    /// feeding, from the last ground state. Bounded by `query_raw_max`.
-    query_raw: std.ArrayListUnmanaged(u8) = .empty,
-    query_raw_max: usize = default_query_max_bytes,
-    /// True while `vt_write_until_query` keeps `query_raw`.
-    query_raw_active: bool = false,
-    /// True when the sequence was longer than `query_raw_max` (or the
-    /// buffer could not grow), so `query_raw` holds only its start.
-    query_raw_truncated: bool = false,
-    /// True when the run that is unfinished at the end of the last write
-    /// has all of its bytes in `query_raw`, so a later
-    /// `vt_write_until_query` can continue it.
-    query_raw_open: bool = false,
-    /// True when the current run began in a write that did not keep its
-    /// bytes, so `query_raw` cannot hold the whole sequence.
-    query_raw_lost: bool = false,
+    /// The bytes of the sequence that `vt_write_until_query` is feeding.
+    query_raw: QueryRaw = .{},
     tracked_grid_refs: std.AutoArrayHashMapUnmanaged(*grid_ref_tracked_c.TrackedGridRef, void) = .{},
     searches: std.AutoArrayHashMapUnmanaged(*search_c.SearchWrapper, void) = .{},
 
@@ -663,16 +697,13 @@ const Effects = struct {
     fn queryTrampoline(handler: *Handler, kind: Handler.Query) void {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.query orelse return;
-        const raw: []const u8 = if (wrapper.query_raw_active and !wrapper.query_raw_lost)
-            wrapper.query_raw.items
-        else
-            "";
+        const raw = &wrapper.query_raw;
         const request: Query = .{
             .size = @sizeOf(Query),
             .kind = kind,
-            .request = .init(raw),
-            .request_available = wrapper.query_raw_active and !wrapper.query_raw_lost,
-            .request_truncated = wrapper.query_raw_active and !wrapper.query_raw_lost and wrapper.query_raw_truncated,
+            .request = .init(if (raw.available()) raw.bytes.items else ""),
+            .request_available = raw.available(),
+            .request_truncated = raw.available() and raw.truncated,
         };
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
@@ -1073,7 +1104,7 @@ pub fn vt_write(
     len: usize,
 ) callconv(lib.calling_conv) void {
     const wrapper = terminal_ orelse return;
-    wrapper.query_raw_open = false;
+    wrapper.query_raw.open = false;
     wrapper.stream.nextSlice(ptr[0..len]);
 }
 
@@ -1094,7 +1125,7 @@ pub fn vt_write_until_ground(
     else
         return .invalid_value;
 
-    wrapper.query_raw_open = false;
+    wrapper.query_raw.open = false;
     if (wrapper.stream.nextSliceUntilGround(input)) |consumed| {
         out_consumed.* = consumed;
         return .success;
@@ -1102,6 +1133,23 @@ pub fn vt_write_until_ground(
 
     out_consumed.* = len;
     return .no_value;
+}
+
+const ParserState = @import("../Parser.zig").State;
+
+fn stringState(state: ParserState) bool {
+    return switch (state) {
+        .osc_string, .dcs_passthrough, .sos_pm_apc_string => true,
+        else => false,
+    };
+}
+
+/// The states that a C1 introducer or ESC starts a sequence in.
+fn entryState(state: ParserState) bool {
+    return switch (state) {
+        .csi_entry, .dcs_entry, .osc_string, .sos_pm_apc_string => true,
+        else => false,
+    };
 }
 
 /// True for a byte that can start a sequence with a reply: ESC, ENQ and the
@@ -1114,24 +1162,11 @@ fn queryStartByte(c: u8) bool {
     };
 }
 
-fn stringState(state: @import("../Parser.zig").State) bool {
-    return switch (state) {
-        .osc_string, .dcs_passthrough, .sos_pm_apc_string => true,
+fn c1Introducer(c: u8) bool {
+    return switch (c) {
+        0x90, 0x98, 0x9b, 0x9d, 0x9e, 0x9f => true,
         else => false,
     };
-}
-
-/// Keep one byte of the run that `vt_write_until_query` is feeding, within
-/// the request limit.
-fn queryRawAppend(wrapper: *TerminalWrapper, alloc: std.mem.Allocator, c: u8) void {
-    wrapper.query_raw_active = true;
-    if (wrapper.query_raw.items.len < wrapper.query_raw_max) {
-        wrapper.query_raw.append(alloc, c) catch {
-            wrapper.query_raw_truncated = true;
-        };
-    } else {
-        wrapper.query_raw_truncated = true;
-    }
 }
 
 /// Feed `input` up to and including the byte that completes the first query
@@ -1158,32 +1193,34 @@ pub fn vt_write_until_query(
         return .invalid_value;
 
     const alloc = wrapper.terminal.gpa();
-    wrapper.stream.handler.query_reported = false;
+    const raw = &wrapper.query_raw;
+    const stream = &wrapper.stream;
+    stream.handler.query_reported = false;
     defer {
-        wrapper.query_raw_active = false;
-        wrapper.query_raw_open = !wrapper.stream.ground();
-        wrapper.stream.handler.query_reported = false;
+        raw.active = false;
+        raw.open = !stream.ground();
+        stream.handler.query_reported = false;
     }
 
-    // True when the next byte begins a new run that `query_raw` keeps.
+    // True when the next byte begins a new run that `raw` keeps.
     var fresh = false;
-    if (wrapper.stream.ground()) {
+    if (stream.ground()) {
         fresh = true;
-    } else if (!wrapper.query_raw_open) {
+    } else if (!raw.open) {
         // A run began in a write that did not keep its bytes.
-        wrapper.query_raw.clearRetainingCapacity();
-        wrapper.query_raw_truncated = false;
-        wrapper.query_raw_lost = true;
+        raw.clear();
+        raw.lost = true;
     }
+
     var i: usize = 0;
     while (i < input.len) {
-        if (wrapper.stream.ground()) {
+        if (stream.ground()) {
             // Plain text and controls cannot complete a query, so feed
             // everything before the next possible start in one call.
             var end: usize = i;
             while (end < input.len and !queryStartByte(input[end])) end += 1;
             if (end > i) {
-                wrapper.stream.nextSlice(input[i..end]);
+                stream.nextSlice(input[i..end]);
                 i = end;
                 fresh = true;
                 continue;
@@ -1195,21 +1232,44 @@ pub fn vt_write_until_query(
         // which can end in the middle of a UTF-8 character) to the end of
         // the sequence.
         if (fresh) {
-            wrapper.query_raw.clearRetainingCapacity();
-            wrapper.query_raw_truncated = false;
-            wrapper.query_raw_lost = false;
+            raw.clear();
             fresh = false;
         }
+
+        const c = input[i];
+        const old = stream.parser.state;
 
         // A string sequence ends with ST (ESC \), and the stream completes
         // it on the ESC. An ESC that is the last byte of the input may be
         // the first byte of an ST whose second byte comes later, so leave
         // it unconsumed. The caller offers it again with the next bytes.
-        const c = input[i];
-        if (c == 0x1b and i + 1 == input.len and stringState(wrapper.stream.parser.state)) {
+        if (c == 0x1b and i + 1 == input.len and stringState(old)) {
             out_consumed.* = i;
             return .no_value;
         }
+
+        // ENQ inside an unfinished sequence executes on its own and leaves
+        // the sequence pending. It is its own query: report only its byte,
+        // and keep the bytes of the pending sequence for later.
+        if (c == 0x05 and !stream.ground() and !stringState(old)) {
+            const outer = raw.*;
+            raw.* = .{ .max = outer.max, .active = true };
+            raw.append(alloc, c);
+            stream.next(c);
+            i += 1;
+            const reported = stream.handler.query_reported;
+            raw.bytes.deinit(alloc);
+            raw.* = outer;
+            if (reported) {
+                out_consumed.* = i;
+                return .success;
+            }
+            continue;
+        }
+
+        // An ESC outside a string sequence abandons the sequence in
+        // progress and starts a new one.
+        if (c == 0x1b and !stringState(old)) raw.clear();
 
         // Keep the byte before the stream sees it, because the effect runs
         // inside `next` for the byte that completes the sequence. The
@@ -1217,22 +1277,34 @@ pub fn vt_write_until_query(
         // the `\` follows, keep it too before the effect runs, and feed it
         // right after, so the reported bytes are the whole sequence.
         const st = c == 0x1b and i + 1 < input.len and input[i + 1] == '\\' and
-            stringState(wrapper.stream.parser.state);
-        queryRawAppend(wrapper, alloc, c);
-        if (st) queryRawAppend(wrapper, alloc, '\\');
-        wrapper.stream.next(c);
+            stringState(old);
+        raw.active = true;
+        raw.append(alloc, c);
+        if (st) raw.append(alloc, '\\');
+        stream.next(c);
         i += 1;
         if (st) {
-            wrapper.stream.next('\\');
+            stream.next('\\');
             i += 1;
         }
 
-        if (wrapper.stream.handler.query_reported) {
+        // A string sequence that an ESC ended without an ST: the ESC also
+        // begins the next sequence. A C1 introducer that moved the parser
+        // into a new sequence starts a new run too. The effect already ran.
+        const after = stream.parser.state;
+        if ((c == 0x1b and stringState(old) and !st and after == .escape) or
+            (c1Introducer(c) and entryState(after) and after != old))
+        {
+            raw.clear();
+            raw.append(alloc, c);
+        }
+
+        if (stream.handler.query_reported) {
             out_consumed.* = i;
             return .success;
         }
 
-        if (wrapper.stream.ground()) fresh = true;
+        if (stream.ground()) fresh = true;
     }
 
     out_consumed.* = input.len;
@@ -1635,7 +1707,7 @@ fn setTyped(
         .semantic_prompt => wrapper.effects.semantic_prompt = value,
         .reset => wrapper.effects.reset = value,
         .query => wrapper.effects.query = value,
-        .query_max_bytes => wrapper.query_raw_max = if (value) |ptr| ptr.* else default_query_max_bytes,
+        .query_max_bytes => wrapper.query_raw.max = if (value) |ptr| ptr.* else default_query_max_bytes,
         .clipboard_write => {
             wrapper.effects.clipboard_write = value;
             wrapper.stream.handler.effects.clipboard_write = if (value != null)
@@ -2301,7 +2373,7 @@ pub fn free(terminal_: Terminal) callconv(lib.calling_conv) void {
     for (wrapper.searches.keys()) |search| search.terminal = null;
     wrapper.searches.deinit(alloc);
     wrapper.stream.deinit();
-    wrapper.query_raw.deinit(alloc);
+    wrapper.query_raw.bytes.deinit(alloc);
     t.deinit(alloc);
     if (wrapper.tmp_dir_path) |path| alloc.free(path);
     alloc.destroy(t);
@@ -7464,6 +7536,8 @@ test "vt_write_until_query reports every query kind with its exact bytes" {
         .{ .seq = "\x1b[15t", .kind = .size_csi_15_t },
         .{ .seq = "\x1b[19t", .kind = .size_csi_19_t },
         .{ .seq = "\x1b[20t", .kind = .size_csi_20_t },
+        .{ .seq = "\x1b[14;2t", .kind = .size_csi_14_2_t },
+        .{ .seq = "\x1b[13;2t", .kind = .size_csi_13_2_t },
         .{ .seq = "\x1bP$qm\x1b\\", .kind = .decrqss },
         .{ .seq = "\x1bP+q544e\x1b\\", .kind = .xtgettcap },
         .{ .seq = "\x1b]10;?\x1b\\", .kind = .osc_color },
@@ -7643,4 +7717,175 @@ test "vt_write_until_query leaves a trailing ESC of an unfinished string unconsu
     try testing.expectEqual(@as(usize, 1), QueryProbe.count);
     try testing.expect(QueryProbe.available);
     try testing.expectEqualSlices(u8, seq, QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query reports a restarted sequence without the abandoned prefix" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // The second ESC abandons the first CSI. Only the second is the request.
+    const input = "\x1b[3\x1b[5n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expectEqualSlices(u8, input[3..], QueryProbe.raw[0..QueryProbe.raw_len]);
+    try testing.expect(!QueryProbe.truncated);
+}
+
+test "vt_write_until_query does not count an abandoned prefix against the limit" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const limit: usize = 4;
+    try testing.expectEqual(Result.success, set(t, .query_max_bytes, &limit));
+
+    const input = "\x1b[1;2;3;4\x1b[5n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expect(!QueryProbe.truncated);
+    try testing.expectEqualSlices(u8, "\x1b[5n", QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query reports ENQ inside a CSI alone and keeps the CSI pending" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const part_a = "\x1b[";
+    const enq = "\x05";
+    const part_b = "5n";
+    var consumed: usize = 0;
+
+    var input: [part_a.len + enq.len]u8 = undefined;
+    @memcpy(input[0..part_a.len], part_a);
+    @memcpy(input[part_a.len..], enq);
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, &input, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(QueryKind.enquiry, QueryProbe.kind);
+    try testing.expect(QueryProbe.available);
+    try testing.expectEqualSlices(u8, enq, QueryProbe.raw[0..QueryProbe.raw_len]);
+
+    // The CSI is still pending and completes as its own query. The ENQ
+    // executed independently, so it is not one of the CSI's bytes.
+    QueryProbe.reset();
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, part_b.ptr, part_b.len, &consumed),
+    );
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expect(QueryProbe.available);
+    var expected: [part_a.len + part_b.len]u8 = undefined;
+    @memcpy(expected[0..part_a.len], part_a);
+    @memcpy(expected[part_a.len..], part_b);
+    try testing.expectEqualSlices(u8, &expected, QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query starts the next request at the ESC that ended a string" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // The ESC ends the OSC (the stream completes it there) and also starts
+    // the CSI that follows.
+    const osc_part = "\x1b]52;c;?\x1b";
+    const csi = "[5n";
+    var input: [osc_part.len + csi.len]u8 = undefined;
+    @memcpy(input[0..osc_part.len], osc_part);
+    @memcpy(input[osc_part.len..], csi);
+
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, &input, input.len, &consumed),
+    );
+    try testing.expectEqual(osc_part.len, consumed);
+    try testing.expectEqual(QueryKind.clipboard_read, QueryProbe.kind);
+    try testing.expectEqualSlices(u8, osc_part, QueryProbe.raw[0..QueryProbe.raw_len]);
+
+    // The next request is the CSI, from the shared ESC. The OSC bytes are
+    // not part of it.
+    QueryProbe.reset();
+    const rest = input[consumed..];
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, rest.ptr, rest.len, &consumed),
+    );
+    try testing.expectEqual(rest.len, consumed);
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expect(QueryProbe.available);
+    try testing.expectEqualSlices(u8, input[osc_part.len - 1 ..], QueryProbe.raw[0..QueryProbe.raw_len]);
+}
+
+test "vt_write_until_query ignores CSI 14 and 13 t with unsupported parameters" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    const inputs = [_][]const u8{ "\x1b[14;3t", "\x1b[13;2;1t", "\x1b[14;2;2t", "\x1b[13;3t" };
+    for (inputs) |input| {
+        QueryProbe.reset();
+        var consumed: usize = 0;
+        try testing.expectEqual(
+            Result.no_value,
+            vt_write_until_query(t, input.ptr, input.len, &consumed),
+        );
+        try testing.expectEqual(input.len, consumed);
+        try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+    }
+}
+
+test "QueryRaw keeps a contiguous prefix after a failed append" {
+    var failing = std.testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+
+    // The list reserves room for 128 bytes on its first append, so the
+    // limit is above that and the loop below reaches a growth.
+    var raw: QueryRaw = .{ .max = 4096 };
+    defer raw.bytes.deinit(testing.allocator);
+
+    raw.append(alloc, 'a');
+    raw.append(alloc, 'b');
+    try testing.expect(!raw.truncated);
+
+    // The next growth fails. Later bytes must not be kept even when the
+    // allocator works again.
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    var grew = false;
+    while (raw.bytes.items.len < 4096 and !raw.truncated) {
+        raw.append(alloc, 'x');
+        grew = true;
+    }
+    try testing.expect(grew);
+    try testing.expect(raw.truncated);
+    const kept = raw.bytes.items.len;
+
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    raw.append(alloc, 'z');
+    raw.append(alloc, 'z');
+    try testing.expectEqual(kept, raw.bytes.items.len);
+    try testing.expectEqualSlices(u8, "ab", raw.bytes.items[0..2]);
+    for (raw.bytes.items[2..]) |c| try testing.expectEqual(@as(u8, 'x'), c);
+}
+
+test "QueryRaw stops at its limit" {
+    var raw: QueryRaw = .{ .max = 3 };
+    defer raw.bytes.deinit(testing.allocator);
+    for ("abcdef") |c| raw.append(testing.allocator, c);
+    try testing.expect(raw.truncated);
+    try testing.expectEqualSlices(u8, "abc", raw.bytes.items);
+
+    raw.clear();
+    try testing.expect(!raw.truncated);
+    for ("abc") |c| raw.append(testing.allocator, c);
+    try testing.expect(!raw.truncated);
 }
