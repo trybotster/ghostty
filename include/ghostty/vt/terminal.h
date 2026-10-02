@@ -2382,6 +2382,21 @@ typedef enum GHOSTTY_ENUM_TYPED {
 } GhosttyTerminalOption;
 
 /**
+ * What the program set with XTSHIFTESCAPE (CSI > Ps s).
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** The program has not set it. */
+  GHOSTTY_MOUSE_SHIFT_CAPTURE_UNSET = 0,
+  /** The program turned it off (CSI > 0 s). */
+  GHOSTTY_MOUSE_SHIFT_CAPTURE_OFF = 1,
+  /** The program turned it on (CSI > 1 s): Shift is captured for the mouse protocol. */
+  GHOSTTY_MOUSE_SHIFT_CAPTURE_ON = 2,
+  GHOSTTY_MOUSE_SHIFT_CAPTURE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyMouseShiftCapture;
+
+/**
  * Terminal data types.
  *
  * These values specify what type of data to extract from a terminal
@@ -2831,6 +2846,25 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Output type: GhosttyMouseFormat *
    */
   GHOSTTY_TERMINAL_DATA_MOUSE_FORMAT = 44,
+
+  /**
+   * Whether xterm's modifyOtherKeys state 2 is on.
+   *
+   * CSI > 4 ; 2 m turns it on, and any other modifyOtherKeys value turns it
+   * off. It is not one of the terminal modes, so GHOSTTY_TERMINAL_DATA_MODE
+   * cannot give it. The key encoder reads the same state.
+   *
+   * Output type: bool *
+   */
+  GHOSTTY_TERMINAL_DATA_MODIFY_OTHER_KEYS_2 = 45,
+
+  /**
+   * What the program set with XTSHIFTESCAPE (CSI > Ps s): whether Shift
+   * stays with the terminal when a mouse protocol is on.
+   *
+   * Output type: GhosttyMouseShiftCapture *
+   */
+  GHOSTTY_TERMINAL_DATA_MOUSE_SHIFT_CAPTURE = 46,
   GHOSTTY_TERMINAL_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalData;
 
