@@ -7570,14 +7570,17 @@ test "clipboard requests report the selection and terminator as written" {
     defer t.deinit(testing.allocator);
 
     const S = struct {
-        var selection: [8]u8 = undefined;
+        var selection: [16]u8 = undefined;
         var selection_len: usize = 0;
         var terminator: osc.Terminator = .st;
         var location: clipboard.Location = .standard;
         var count: usize = 0;
         var kind: enum { none, read, write } = .none;
+        var payload: [16]u8 = undefined;
+        var payload_len: usize = 0;
 
         fn reset() void {
+            payload_len = 0;
             selection_len = 0;
             terminator = .st;
             location = .standard;
@@ -7602,6 +7605,11 @@ test "clipboard requests report the selection and terminator as written" {
         fn clipboardWrite(_: *Handler, write: clipboard.Write) void {
             kind = .write;
             record(write.selection, write.terminator, write.location);
+            if (write.contents.len == 1) {
+                const data = write.contents[0].data;
+                @memcpy(payload[0..data.len], data);
+                payload_len = data.len;
+            }
             write.reply(.{ .success = .{} });
         }
 
@@ -7618,7 +7626,11 @@ test "clipboard requests report the selection and terminator as written" {
     // Every selection character the contract allows is reported as written,
     // although `location` folds most of them into one destination. The
     // sequence is built from the selection, so the expectation is the input.
-    const selections = "cpqs01234567";
+    const selections = [_][]const u8{
+        "c", "p", "q", "s", "0", "1", "2", "3", "4", "5", "6", "7",
+        // Selections of several characters, which the program may write.
+        "s0", "cp", "cpqs01234567",
+    };
     for (selections) |sel| {
         inline for ([_]struct { suffix: []const u8, term: osc.Terminator }{
             .{ .suffix = "\x1b\\", .term = .st },
@@ -7626,22 +7638,25 @@ test "clipboard requests report the selection and terminator as written" {
         }) |ending| {
             // A read.
             S.reset();
-            var buf: [32]u8 = undefined;
-            const read_seq = try std.fmt.bufPrint(&buf, "\x1b]52;{c};?{s}", .{ sel, ending.suffix });
+            var buf: [64]u8 = undefined;
+            const read_seq = try std.fmt.bufPrint(&buf, "\x1b]52;{s};?{s}", .{ sel, ending.suffix });
             s.nextSlice(read_seq);
             try testing.expectEqual(@as(usize, 1), S.count);
             try testing.expect(S.kind == .read);
-            try testing.expectEqualSlices(u8, &[_]u8{sel}, S.selection[0..S.selection_len]);
+            try testing.expectEqualStrings(sel, S.selection[0..S.selection_len]);
             try testing.expectEqual(ending.term, S.terminator);
 
             // A write ("aGk=" is base64 text).
             S.reset();
-            const write_seq = try std.fmt.bufPrint(&buf, "\x1b]52;{c};aGk={s}", .{ sel, ending.suffix });
+            const write_seq = try std.fmt.bufPrint(&buf, "\x1b]52;{s};aGk={s}", .{ sel, ending.suffix });
             s.nextSlice(write_seq);
             try testing.expectEqual(@as(usize, 1), S.count);
             try testing.expect(S.kind == .write);
-            try testing.expectEqualSlices(u8, &[_]u8{sel}, S.selection[0..S.selection_len]);
+            try testing.expectEqualStrings(sel, S.selection[0..S.selection_len]);
             try testing.expectEqual(ending.term, S.terminator);
+
+            // The payload is the decoded text, for every selection.
+            try testing.expectEqualStrings("hi", S.payload[0..S.payload_len]);
         }
     }
 
