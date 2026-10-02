@@ -281,6 +281,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
         .show_desktop_notification = .{
             .title = "",
             .body = data[0 .. data.len - 1 :0],
+            .source = .osc9,
         },
     };
     return &parser.command;
