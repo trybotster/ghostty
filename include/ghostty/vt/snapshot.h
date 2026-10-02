@@ -193,6 +193,22 @@ typedef enum GHOSTTY_ENUM_TYPED {
    */
   GHOSTTY_SNAPSHOT_DECODER_OPT_COMPRESS_HISTORY = 2,
 
+  /**
+   * The Kitty image storage limit, in bytes, of every restored screen.
+   *
+   * A snapshot holds no images and no limit. Without this option the
+   * restored screens take the library default, so a terminal that was
+   * configured with a limit of zero (GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT)
+   * would accept image sequences after the restore that the original ignored.
+   * Set this to the limit that the original terminal used. A value of zero
+   * disables the Kitty graphics protocol on the restored terminal.
+   *
+   * Has no effect when Kitty graphics are disabled at build time.
+   *
+   * Input type: uint64_t *
+   */
+  GHOSTTY_SNAPSHOT_DECODER_OPT_KITTY_IMAGE_STORAGE_LIMIT = 3,
+
   GHOSTTY_SNAPSHOT_DECODER_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySnapshotDecoderOption;
 
