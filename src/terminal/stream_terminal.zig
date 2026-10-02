@@ -1613,6 +1613,8 @@ pub const Handler = struct {
         var reply_state: KittyClipboardWriteReplyState = .{
             .handler = self,
             .pw = pw,
+            .state = state,
+            .terminator = terminator,
         };
         func(self, .{
             .location = committed.loc,
@@ -1626,12 +1628,14 @@ pub const Handler = struct {
 
         // The program is waiting on the commit status, so a callback
         // that returned without a reply is answered as a denial rather
-        // than silence.
-        self.kittyClipboardFinish(
-            state,
-            reply_state.status orelse .EPERM,
-            terminator,
-        );
+        // than silence. A reply wrote its response while the callback
+        // ran (see KittyClipboardWriteReplyState.reply), so a host sees
+        // the acknowledgement bytes at the reply and not after it.
+        if (reply_state.status == null) {
+            self.kittyClipboardFinish(state, .EPERM, terminator);
+        } else {
+            self.kittyClipboardAbort();
+        }
     }
 
     /// Reply state for one synchronous Kitty clipboard write. This lives
@@ -1642,6 +1646,11 @@ pub const Handler = struct {
 
         /// The effective password, empty when the request had none.
         pw: []const u8,
+
+        /// The transaction that the reply answers and the terminator of
+        /// the commit that ended it.
+        state: *const kitty_clipboard.WriteState,
+        terminator: osc.Terminator,
 
         /// The replied commit status, mapped 1:1 from the reply result;
         /// null until the callback replies.
@@ -1675,6 +1684,14 @@ pub const Handler = struct {
                     break :status .DONE;
                 },
             };
+            // The response is written now, inside the callback, so that
+            // it comes with the reply and before the callback returns.
+            self.handler.kittyClipboardRespond(&.{
+                .op = .write,
+                .status = self.status.?,
+                .id = self.state.id,
+                .terminator = self.terminator,
+            });
         }
     };
 
@@ -4453,6 +4470,8 @@ const KittyClipboardCapture = struct {
     var write_count: usize = 0;
     var write_result: ?clipboard.Write.Result = .{ .success = .{} };
     var write_reply_twice: bool = false;
+    /// How many response bytes the host had seen right after its reply.
+    var responses_after_reply: usize = 0;
     var last_location: clipboard.Location = .standard;
     var last_contents_len: usize = 0;
     var last_mimes: [8][64]u8 = undefined;
@@ -4483,6 +4502,7 @@ const KittyClipboardCapture = struct {
         write_count = 0;
         write_result = .{ .success = .{} };
         write_reply_twice = false;
+        responses_after_reply = 0;
         last_location = .standard;
         last_contents_len = 0;
         last_mime_lens = @splat(0);
@@ -4522,6 +4542,7 @@ const KittyClipboardCapture = struct {
         last_write_granted = write.granted;
         last_write_can_remember = write.can_remember;
         if (write_result) |r| write.reply(r);
+        responses_after_reply = responses_len;
         if (write_reply_twice) write.reply(.io_error);
     }
 
@@ -4607,6 +4628,9 @@ test "kitty clipboard write transaction round trip" {
         "\x1B]5522;type=write:status=DONE:id=42\x1B\\",
         S.responseSlice(),
     );
+
+    // The acknowledgement was written while the callback ran, with its reply.
+    try testing.expectEqual(S.responses_len, S.responses_after_reply);
 
     // A commit with no transaction in flight is silently ignored.
     s.nextSlice("\x1B]5522;type=wdata\x1B\\");
