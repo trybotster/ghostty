@@ -172,6 +172,12 @@ pub const ClipboardWrite = extern struct {
     /// Terminal-owned reply state; opaque to the embedder.
     ctx: *const anyopaque,
     reply: ClipboardWriteReplyFn,
+    /// The OSC 52 selection exactly as the program wrote it, empty when it
+    /// was left out or the protocol has none. `location` is a coarser
+    /// mapping of the same character.
+    selection: lib.String,
+    /// The terminator of the request.
+    terminator: osc.Terminator.C,
 };
 
 /// The reply to a clipboard write request.
@@ -217,6 +223,12 @@ pub const ClipboardRead = extern struct {
     /// Terminal-owned reply state; opaque to the embedder.
     ctx: *const anyopaque,
     reply: ClipboardReadReplyFn,
+    /// The OSC 52 selection exactly as the program wrote it, empty when it
+    /// was left out or the protocol has none. `location` is a coarser
+    /// mapping of the same character.
+    selection: lib.String,
+    /// The terminator of the request.
+    terminator: osc.Terminator.C,
 };
 
 /// C function pointer type for replying to a clipboard read.
@@ -522,6 +534,11 @@ const Effects = struct {
             .can_remember = write.can_remember,
             .ctx = &ctx,
             .reply = &clipboardWriteReplyTrampoline,
+            .selection = .init(write.selection),
+            .terminator = switch (write.terminator) {
+                .st => .st,
+                .bel => .bel,
+            },
         };
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
@@ -576,6 +593,11 @@ const Effects = struct {
             .can_remember = read.can_remember,
             .ctx = &ctx,
             .reply = &clipboardReadReplyTrampoline,
+            .selection = .init(read.selection),
+            .terminator = switch (read.terminator) {
+                .st => .st,
+                .bel => .bel,
+            },
         };
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }

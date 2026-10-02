@@ -831,6 +831,20 @@ struct GhosttyClipboardWrite {
 
   /** Answer the write; see the struct documentation. */
   GhosttyClipboardWriteReplyFn reply;
+
+  /**
+   * The OSC 52 selection exactly as the program wrote it: empty (len=0) when
+   * the program left it out, and empty for the other protocols. `location`
+   * is a coarser mapping of the same character. This is a field that follows
+   * `reply`: read it only when `size` covers it.
+   */
+  GhosttyString selection;
+
+  /**
+   * The terminator of the request (BEL or ST). The other protocols report
+   * ST. Read it only when `size` covers it.
+   */
+  GhosttyOscTerminator terminator;
 };
 
 /**
@@ -1018,6 +1032,21 @@ struct GhosttyClipboardRead {
 
   /** Answer the read; see the struct documentation. */
   GhosttyClipboardReadReplyFn reply;
+
+  /**
+   * The OSC 52 selection exactly as the program wrote it: empty (len=0) when
+   * the program left it out, and empty for the other protocols. `location`
+   * is a coarser mapping of the same character. Read it only when `size`
+   * covers it.
+   */
+  GhosttyString selection;
+
+  /**
+   * The terminator of the request (BEL or ST). The reply to the program uses
+   * the same one. The other protocols report ST. Read it only when `size`
+   * covers it.
+   */
+  GhosttyOscTerminator terminator;
 };
 
 /**

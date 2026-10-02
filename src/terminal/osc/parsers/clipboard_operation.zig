@@ -43,6 +43,7 @@ pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*Command {
                 .kind = data[0],
                 .data = data[2 .. data.len - 1 :0],
                 .terminator = .init(terminator_ch),
+                .selection = data[0..1],
             },
         };
     }

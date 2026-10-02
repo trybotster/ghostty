@@ -885,6 +885,7 @@ pub const Handler = struct {
             .request_xt_checksum => self.reportXtChecksum(value),
             .clipboard_contents => self.clipboardContents(
                 value.kind,
+                value.selection,
                 value.data,
                 value.terminator,
             ) catch |err| {
@@ -1072,6 +1073,7 @@ pub const Handler = struct {
     fn clipboardContents(
         self: *Handler,
         kind: u8,
+        selection: []const u8,
         data: []const u8,
         terminator: osc.Terminator,
     ) !void {
@@ -1084,7 +1086,7 @@ pub const Handler = struct {
         // OSC 52 uses a "?" payload to request the clipboard contents.
         if (data.len == 1 and data[0] == '?') {
             self.query(.clipboard_read);
-            self.clipboardRead(location, terminator);
+            self.clipboardRead(location, selection, terminator);
             return;
         }
 
@@ -1095,6 +1097,8 @@ pub const Handler = struct {
             func(self, .{
                 .location = location,
                 .contents = &.{},
+                .selection = selection,
+                .terminator = terminator,
                 .name = "",
                 .granted = false,
                 .can_remember = false,
@@ -1127,6 +1131,8 @@ pub const Handler = struct {
         func(self, .{
             .location = location,
             .contents = &contents,
+            .selection = selection,
+            .terminator = terminator,
             .name = "",
             .granted = false,
             .can_remember = false,
@@ -1143,6 +1149,7 @@ pub const Handler = struct {
     fn clipboardRead(
         self: *Handler,
         location: clipboard.Location,
+        selection: []const u8,
         terminator: osc.Terminator,
     ) void {
         const func = self.effects.clipboard_read orelse return;
@@ -1154,6 +1161,8 @@ pub const Handler = struct {
         };
         func(self, .{
             .location = location,
+            .selection = selection,
+            .terminator = terminator,
             .mimes = &.{"text/plain"},
             .list = false,
             .name = "",
@@ -7554,4 +7563,109 @@ test "full reset drops kitty clipboard grants" {
     try testing.expectEqual(@as(usize, 1), S.read_count);
     try testing.expect(!S.last_read_granted);
     try s.handler.kitty_clipboard_grants.grant(testing.allocator, "pw", .read, false);
+}
+
+test "clipboard requests report the selection and terminator as written" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var selection: [8]u8 = undefined;
+        var selection_len: usize = 0;
+        var terminator: osc.Terminator = .st;
+        var location: clipboard.Location = .standard;
+        var count: usize = 0;
+        var kind: enum { none, read, write } = .none;
+
+        fn reset() void {
+            selection_len = 0;
+            terminator = .st;
+            location = .standard;
+            count = 0;
+            kind = .none;
+        }
+
+        fn record(sel: []const u8, term: osc.Terminator, loc: clipboard.Location) void {
+            @memcpy(selection[0..sel.len], sel);
+            selection_len = sel.len;
+            terminator = term;
+            location = loc;
+            count += 1;
+        }
+
+        fn clipboardRead(_: *Handler, read: clipboard.Read) void {
+            kind = .read;
+            record(read.selection, read.terminator, read.location);
+            read.reply(.{ .success = .{ .contents = &.{} } });
+        }
+
+        fn clipboardWrite(_: *Handler, write: clipboard.Write) void {
+            kind = .write;
+            record(write.selection, write.terminator, write.location);
+            write.reply(.{ .success = .{} });
+        }
+
+        fn writePty(_: *Handler, _: []const u8) void {}
+    };
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_read = &S.clipboardRead;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // Every selection character the contract allows is reported as written,
+    // although `location` folds most of them into one destination. The
+    // sequence is built from the selection, so the expectation is the input.
+    const selections = "cpqs01234567";
+    for (selections) |sel| {
+        inline for ([_]struct { suffix: []const u8, term: osc.Terminator }{
+            .{ .suffix = "\x1b\\", .term = .st },
+            .{ .suffix = "\x07", .term = .bel },
+        }) |ending| {
+            // A read.
+            S.reset();
+            var buf: [32]u8 = undefined;
+            const read_seq = try std.fmt.bufPrint(&buf, "\x1b]52;{c};?{s}", .{ sel, ending.suffix });
+            s.nextSlice(read_seq);
+            try testing.expectEqual(@as(usize, 1), S.count);
+            try testing.expect(S.kind == .read);
+            try testing.expectEqualSlices(u8, &[_]u8{sel}, S.selection[0..S.selection_len]);
+            try testing.expectEqual(ending.term, S.terminator);
+
+            // A write ("aGk=" is base64 text).
+            S.reset();
+            const write_seq = try std.fmt.bufPrint(&buf, "\x1b]52;{c};aGk={s}", .{ sel, ending.suffix });
+            s.nextSlice(write_seq);
+            try testing.expectEqual(@as(usize, 1), S.count);
+            try testing.expect(S.kind == .write);
+            try testing.expectEqualSlices(u8, &[_]u8{sel}, S.selection[0..S.selection_len]);
+            try testing.expectEqual(ending.term, S.terminator);
+        }
+    }
+
+    // `c` and `q` fold into the same location, but the selection tells them apart.
+    S.reset();
+    s.nextSlice("\x1b]52;q;?\x1b\\");
+    const q_location = S.location;
+    try testing.expectEqualSlices(u8, "q", S.selection[0..S.selection_len]);
+    S.reset();
+    s.nextSlice("\x1b]52;c;?\x1b\\");
+    try testing.expectEqual(q_location, S.location);
+    try testing.expectEqualSlices(u8, "c", S.selection[0..S.selection_len]);
+
+    // A selection that the program left out is reported empty, for reads and
+    // for writes, and the request terminator is still reported.
+    S.reset();
+    s.nextSlice("\x1b]52;;?\x07");
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqual(@as(usize, 0), S.selection_len);
+    try testing.expectEqual(osc.Terminator.bel, S.terminator);
+
+    S.reset();
+    s.nextSlice("\x1b]52;;aGk=\x1b\\");
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expect(S.kind == .write);
+    try testing.expectEqual(@as(usize, 0), S.selection_len);
 }
