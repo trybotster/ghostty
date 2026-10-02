@@ -7651,3 +7651,35 @@ test "vt_write_until_query leaves a BEL inside a CSI out of the request but keep
     try testing.expectEqualSlices(u8, input[0..3], QueryProbe.raw[0..3]);
     try testing.expectEqual(input[4], QueryProbe.raw[3]);
 }
+
+test "vt_write_until_query keeps a C1 byte inside a string sequence as payload" {
+    const t = try queryProbeTerminal();
+    defer free(t);
+
+    // Bytes 0x80 to 0xFF inside an OSC string are payload, not C1
+    // transitions (parse_table.zig). The 0x9B does not start a CSI, so
+    // "5n" is OSC text and no query completes.
+    const input = "\x1b]0;title\x9b5n";
+    var consumed: usize = 0;
+    try testing.expectEqual(
+        Result.no_value,
+        vt_write_until_query(t, input.ptr, input.len, &consumed),
+    );
+    try testing.expectEqual(input.len, consumed);
+    try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+
+    // BEL ends the OSC. A later CSI is reported with its own bytes only.
+    try testing.expectEqual(
+        Result.no_value,
+        vt_write_until_query(t, "\x07", 1, &consumed),
+    );
+    try testing.expectEqual(@as(usize, 0), QueryProbe.count);
+
+    const csi = "\x1b[5n";
+    try testing.expectEqual(
+        Result.success,
+        vt_write_until_query(t, csi.ptr, csi.len, &consumed),
+    );
+    try testing.expectEqual(QueryKind.operating_status, QueryProbe.kind);
+    try testing.expectEqualSlices(u8, csi, QueryProbe.raw[0..QueryProbe.raw_len]);
+}
