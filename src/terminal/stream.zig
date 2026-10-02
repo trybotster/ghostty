@@ -2439,6 +2439,9 @@ pub fn Stream(comptime H: type) type {
                                 14 => if (input.params.len == 1) {
                                     // report the text area size in pixels
                                     self.handler.vt(.size_report, .csi_14_t);
+                                } else if (input.params.len == 2 and input.params[1] == 2) {
+                                    // report the window size in pixels
+                                    self.handler.vt(.size_report, .csi_14_2_t);
                                 } else log.warn(
                                     "ignoring CSI 14 t with extra parameters: {f}",
                                     .{input},
@@ -2464,12 +2467,21 @@ pub fn Stream(comptime H: type) type {
                                     "ignoring CSI 21 t with extra parameters: {f}",
                                     .{input},
                                 ),
-                                inline 11, 13, 15, 19, 20 => |number| if (input.params.len == 1) {
+                                13 => if (input.params.len == 1) {
+                                    // report the window position
+                                    self.handler.vt(.size_report, .csi_13_t);
+                                } else if (input.params.len == 2 and input.params[1] == 2) {
+                                    // report the text area position
+                                    self.handler.vt(.size_report, .csi_13_2_t);
+                                } else log.warn(
+                                    "ignoring CSI 13 t with extra parameters: {f}",
+                                    .{input},
+                                ),
+                                inline 11, 15, 19, 20 => |number| if (input.params.len == 1) {
                                     // Queries that the terminal has no answer for.
                                     // They are reported so an embedder can answer.
                                     self.handler.vt(.size_report, switch (number) {
                                         11 => .csi_11_t,
-                                        13 => .csi_13_t,
                                         15 => .csi_15_t,
                                         19 => .csi_19_t,
                                         20 => .csi_20_t,

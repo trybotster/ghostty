@@ -52,6 +52,12 @@ pub const SizeReportStyle = lib.Enum(
         "csi_15_t",
         "csi_19_t",
         "csi_20_t",
+
+        // CSI 14 ; 2 t (window size in pixels) and CSI 13 ; 2 t (text area
+        // position). They differ from CSI 14 t (text area size) and CSI 13 t
+        // (window position).
+        "csi_14_2_t",
+        "csi_13_2_t",
     },
 );
 
