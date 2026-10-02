@@ -2033,6 +2033,9 @@ pub const KittyGraphics = kitty_gfx_c.KittyGraphics;
 /// C: GhosttyTerminalScreen
 pub const TerminalScreen = ScreenSet.Key;
 
+/// What the program set with XTSHIFTESCAPE (CSI > Ps s). Must be kept in sync with GhosttyMouseShiftCapture.
+pub const MouseShiftCapture = lib.Enum(lib.target, &.{ "unset", "off", "on" });
+
 /// C: GhosttyTerminalScrollbar
 pub const TerminalScrollbar = PageList.Scrollbar.C;
 
@@ -2138,6 +2141,8 @@ pub const TerminalData = enum(c_int) {
     memory_usage = 42,
     mouse_event = 43,
     mouse_format = 44,
+    modify_other_keys_2 = 45,
+    mouse_shift_capture = 46,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
@@ -2151,7 +2156,9 @@ pub const TerminalData = enum(c_int) {
             .vt_processing_error,
             .vt_ground,
             .cursor_at_prompt,
+            .modify_other_keys_2,
             => bool,
+            .mouse_shift_capture => MouseShiftCapture,
             .mouse_shape => mouse.Shape,
             .mouse_event => mouse.Event,
             .mouse_format => mouse.Format,
@@ -2260,6 +2267,12 @@ fn getTyped(
         .mouse_shape => out.* = t.mouse_shape,
         .mouse_event => out.* = t.flags.mouse_event,
         .mouse_format => out.* = t.flags.mouse_format,
+        .modify_other_keys_2 => out.* = t.flags.modify_other_keys_2,
+        .mouse_shift_capture => out.* = switch (t.flags.mouse_shift_capture) {
+            .null => .unset,
+            .false => .off,
+            .true => .on,
+        },
         .title => {
             const title = t.getTitle() orelse "";
             out.* = .{ .ptr = title.ptr, .len = title.len };
@@ -8132,4 +8145,35 @@ test "get mouse_event and mouse_format are the active enums, not the mode bits" 
     vt_write(t, "\x1b[?1016l", 8);
     try testing.expectEqual(Result.success, get(t, .mouse_format, @ptrCast(&format)));
     try testing.expectEqual(mouse.Format.x10, format);
+}
+
+test "get modify_other_keys_2 and mouse_shift_capture are the state that the sequences set" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(&lib.alloc.test_allocator, &t, 80, 24));
+    defer free(t);
+
+    var other_keys: bool = undefined;
+    var capture: MouseShiftCapture = undefined;
+
+    // Nothing is set at first.
+    try testing.expectEqual(Result.success, get(t, .modify_other_keys_2, @ptrCast(&other_keys)));
+    try testing.expect(!other_keys);
+    try testing.expectEqual(Result.success, get(t, .mouse_shift_capture, @ptrCast(&capture)));
+    try testing.expectEqual(MouseShiftCapture.unset, capture);
+
+    // CSI > 4 ; 2 m sets modifyOtherKeys state 2; any other value resets it.
+    vt_write(t, "\x1b[>4;2m", 7);
+    try testing.expectEqual(Result.success, get(t, .modify_other_keys_2, @ptrCast(&other_keys)));
+    try testing.expect(other_keys);
+    vt_write(t, "\x1b[>4;1m", 7);
+    try testing.expectEqual(Result.success, get(t, .modify_other_keys_2, @ptrCast(&other_keys)));
+    try testing.expect(!other_keys);
+
+    // XTSHIFTESCAPE: 1 captures, 0 does not.
+    vt_write(t, "\x1b[>1s", 5);
+    try testing.expectEqual(Result.success, get(t, .mouse_shift_capture, @ptrCast(&capture)));
+    try testing.expectEqual(MouseShiftCapture.on, capture);
+    vt_write(t, "\x1b[>0s", 5);
+    try testing.expectEqual(Result.success, get(t, .mouse_shift_capture, @ptrCast(&capture)));
+    try testing.expectEqual(MouseShiftCapture.off, capture);
 }
