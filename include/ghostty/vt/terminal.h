@@ -104,6 +104,7 @@ extern "C" {
  * | `GHOSTTY_TERMINAL_OPT_RENDER_HOLD`      | `GhosttyTerminalRenderHoldFn`     | Synchronized output (mode 2026) begins or ends |
  * | `GHOSTTY_TERMINAL_OPT_SEMANTIC_PROMPT`  | `GhosttyTerminalSemanticPromptFn` | Shell reports a prompt or command step via OSC 133 |
  * | `GHOSTTY_TERMINAL_OPT_RESET`            | `GhosttyTerminalResetFn`          | Full reset (RIS, ESC c)                   |
+ * | `GHOSTTY_TERMINAL_OPT_QUERY`            | `GhosttyTerminalQueryFn`          | A query that expects a reply (see GhosttyTerminalQueryKind) |
  *
  * ### Defining a write_pty callback
  * @snippet c-vt-effects/src/main.c effects-write-pty
@@ -1070,6 +1071,128 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_TERMINAL_NOTIFICATION_SOURCE_OSC777 = 1,
   GHOSTTY_TERMINAL_NOTIFICATION_SOURCE_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalNotificationSource;
+
+/**
+ * The kind of a query that expects a reply from the terminal.
+ *
+ * One sequence is one query, also when it asks several questions. Some kinds
+ * have no reply in libghostty-vt; the query effect still runs for them.
+ *
+ * @ingroup terminal
+ */
+typedef enum GHOSTTY_ENUM_TYPED {
+  /** Never reported. A zeroed value is not a query. */
+  GHOSTTY_TERMINAL_QUERY_INVALID = 0,
+  /** CSI c (DA1). */
+  GHOSTTY_TERMINAL_QUERY_DEVICE_ATTRIBUTES_PRIMARY = 1,
+  /** CSI > c (DA2). */
+  GHOSTTY_TERMINAL_QUERY_DEVICE_ATTRIBUTES_SECONDARY = 2,
+  /** CSI = c (DA3). */
+  GHOSTTY_TERMINAL_QUERY_DEVICE_ATTRIBUTES_TERTIARY = 3,
+  /** CSI 5 n. */
+  GHOSTTY_TERMINAL_QUERY_OPERATING_STATUS = 4,
+  /** CSI 6 n. */
+  GHOSTTY_TERMINAL_QUERY_CURSOR_POSITION = 5,
+  /** CSI ? 996 n. */
+  GHOSTTY_TERMINAL_QUERY_COLOR_SCHEME = 6,
+  /** CSI ? 998 n. */
+  GHOSTTY_TERMINAL_QUERY_VISIBILITY = 7,
+  /** ENQ (0x05). */
+  GHOSTTY_TERMINAL_QUERY_ENQUIRY = 8,
+  /** CSI ? u (kitty keyboard flags). */
+  GHOSTTY_TERMINAL_QUERY_KITTY_KEYBOARD = 9,
+  /** DECRQM for a known or an unknown mode. */
+  GHOSTTY_TERMINAL_QUERY_MODE_REPORT = 10,
+  /** CSI > q. */
+  GHOSTTY_TERMINAL_QUERY_XTVERSION = 11,
+  /** CSI 14 t. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_14_T = 12,
+  /** CSI 16 t. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_16_T = 13,
+  /** CSI 18 t. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_18_T = 14,
+  /** CSI 21 t. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_21_T = 15,
+  /** CSI 11 t. libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_11_T = 16,
+  /** CSI 13 t. libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_13_T = 17,
+  /** CSI 15 t. libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_15_T = 18,
+  /** CSI 19 t. libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_19_T = 19,
+  /** CSI 20 t. libghostty-vt has no reply. */
+  GHOSTTY_TERMINAL_QUERY_SIZE_CSI_20_T = 20,
+  /** DECRQSS. */
+  GHOSTTY_TERMINAL_QUERY_DECRQSS = 21,
+  /** XTGETTCAP. */
+  GHOSTTY_TERMINAL_QUERY_XTGETTCAP = 22,
+  /** OSC 4, 10, 11, 12 and related color queries. One sequence is one query. */
+  GHOSTTY_TERMINAL_QUERY_OSC_COLOR = 23,
+  /** OSC 21 color query. One sequence is one query. */
+  GHOSTTY_TERMINAL_QUERY_KITTY_COLOR = 24,
+  /** OSC 52 clipboard read. */
+  GHOSTTY_TERMINAL_QUERY_CLIPBOARD_READ = 25,
+  /** OSC 5522 clipboard read. */
+  GHOSTTY_TERMINAL_QUERY_KITTY_CLIPBOARD_READ = 26,
+  GHOSTTY_TERMINAL_QUERY_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
+} GhosttyTerminalQueryKind;
+
+/**
+ * A query that expects a reply from the terminal.
+ *
+ * This is a sized struct. The callback must only access fields present in the
+ * size reported by `size`. The bytes are borrowed and valid only for the
+ * callback duration.
+ *
+ * @ingroup terminal
+ */
+typedef struct {
+  /** Size of this struct in bytes. */
+  size_t size;
+
+  /** Which query this is. */
+  GhosttyTerminalQueryKind kind;
+
+  /**
+   * The exact bytes of the query sequence, from its first byte to its final
+   * byte. Valid only when `request_available` is true. Empty otherwise.
+   */
+  GhosttyString request;
+
+  /**
+   * True when the bytes were fed through ghostty_terminal_vt_write_until_query().
+   * ghostty_terminal_vt_write() does not keep the sequence bytes.
+   */
+  bool request_available;
+
+  /**
+   * True when the sequence was longer than the limit that
+   * GHOSTTY_TERMINAL_OPT_QUERY_MAX_BYTES sets. `request` then holds the first
+   * bytes only.
+   */
+  bool request_truncated;
+} GhosttyTerminalQuery;
+
+/**
+ * Callback function type for query.
+ *
+ * Called once for each query sequence, inside the write, before libghostty-vt
+ * computes its own reply. The reply, if there is one, is written through the
+ * write_pty callback right after this callback returns. The callback must not
+ * call ghostty_terminal_vt_write() or ghostty_terminal_vt_write_until_query()
+ * on the same terminal.
+ *
+ * @param terminal The terminal handle
+ * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
+ * @param query The query (borrowed)
+ *
+ * @ingroup terminal
+ */
+typedef void (*GhosttyTerminalQueryFn)(
+    GhosttyTerminal terminal,
+    void* userdata,
+    const GhosttyTerminalQuery* query);
 
 /**
  * A request to show a desktop notification.
@@ -2199,6 +2322,25 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: uint8_t*
    */
   GHOSTTY_TERMINAL_OPT_XT_CHECKSUM_EXTENSION = 45,
+
+  /**
+   * Callback invoked once for each query sequence that expects a reply,
+   * inside the write and before the terminal computes its own reply. Set
+   * to NULL to ignore queries.
+   *
+   * Input type: GhosttyTerminalQueryFn
+   */
+  GHOSTTY_TERMINAL_OPT_QUERY = 46,
+
+  /**
+   * The largest number of request bytes that a query reports. A longer
+   * sequence reports its first bytes and sets request_truncated.
+   *
+   * A NULL value pointer resets to the built-in default of 4096.
+   *
+   * Input type: size_t*
+   */
+  GHOSTTY_TERMINAL_OPT_QUERY_MAX_BYTES = 47,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 
@@ -2789,6 +2931,43 @@ GHOSTTY_API void ghostty_terminal_vt_write(GhosttyTerminal terminal,
  * @ingroup terminal
  */
 GHOSTTY_API GhosttyResult ghostty_terminal_vt_write_until_ground(
+    GhosttyTerminal terminal,
+    const uint8_t* data,
+    size_t len,
+    size_t* out_consumed);
+
+/**
+ * Write VT-encoded data to the terminal up to and including the byte that
+ * completes the first query sequence.
+ *
+ * A query is a sequence that expects a reply (see GhosttyTerminalQueryKind).
+ * The GHOSTTY_TERMINAL_OPT_QUERY callback runs once, inside this call, with
+ * the exact bytes of the sequence from its first byte to its final byte. The
+ * terminal's own reply, if any, is written through the write_pty callback
+ * right after it. Nothing after the query sequence is processed, so the
+ * embedder can hold the reply, offer the query elsewhere, and write the rest
+ * of the data with another call.
+ *
+ * On success, out_consumed is the number of bytes consumed, including the
+ * final byte of the query sequence. GHOSTTY_NO_VALUE means the full slice was
+ * consumed and no query completed. An ESC that is the last byte of the data
+ * while a string sequence (OSC, DCS, APC) is unfinished is left unconsumed
+ * (out_consumed is then smaller than len), because it may begin the ST that
+ * ends the sequence; offer it again with the following bytes. The query bytes are kept only by this
+ * function: ghostty_terminal_vt_write() still reports the query but without
+ * its bytes.
+ *
+ * @param terminal The terminal handle (must not be NULL)
+ * @param data Pointer to the data to write, or NULL when len is zero
+ * @param len Length of the data in bytes
+ * @param[out] out_consumed Number of bytes consumed (must not be NULL)
+ * @return GHOSTTY_SUCCESS if a query completed, GHOSTTY_NO_VALUE if all input
+ *         was consumed with no query, or GHOSTTY_INVALID_VALUE if an argument
+ *         is invalid
+ *
+ * @ingroup terminal
+ */
+GHOSTTY_API GhosttyResult ghostty_terminal_vt_write_until_query(
     GhosttyTerminal terminal,
     const uint8_t* data,
     size_t len,
