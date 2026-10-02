@@ -43,6 +43,15 @@ pub const SizeReportStyle = lib.Enum(
         "csi_16_t",
         "csi_18_t",
         "csi_21_t",
+
+        // XTWINOPS queries that this library cannot answer. They are
+        // recognized so that an embedder can see the query (see
+        // `Handler.Query`) and answer it itself.
+        "csi_11_t",
+        "csi_13_t",
+        "csi_15_t",
+        "csi_19_t",
+        "csi_20_t",
     },
 );
 

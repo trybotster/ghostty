@@ -57,6 +57,11 @@ pub const Handler = struct {
     /// do not flag this.
     semantic_failure: bool = false,
 
+    /// True after the `query` effect was called for a query sequence. A
+    /// writer that wants to stop after a query reads and clears this
+    /// between bytes.
+    query_reported: bool = false,
+
     /// Callbacks for certain effects that handlers may have. These
     /// may or may not fully replace internal handling of certain effects,
     /// but they allow for the handler to trigger or query external
@@ -284,6 +289,20 @@ pub const Handler = struct {
         /// is 256 bytes; longer strings will be silently ignored.
         xtversion: ?*const fn (*Handler) []const u8,
 
+        /// Called once for each query sequence that expects a reply from
+        /// the terminal, before the terminal computes its own reply. The
+        /// callback runs inside the stream write, so it must not write to
+        /// the stream. It receives the kind only; an embedder that needs
+        /// the exact request bytes reads them from the bytes that it fed.
+        ///
+        /// The terminal's own reply, if it has one, is written through
+        /// `write_pty` right after this callback returns. An embedder
+        /// that wants to hold that reply keeps it from that callback.
+        ///
+        /// This is called whether or not a reply exists, and also for
+        /// queries that the terminal never answers (see `Query`).
+        query: ?*const fn (*Handler, Query) void,
+
         /// Called with `true` when the running program asks the terminal
         /// to stop updating the screen, and with `false` when it allows
         /// updates again. The time in between is a "render hold". Programs
@@ -333,8 +352,76 @@ pub const Handler = struct {
             .pwd_changed = null,
             .write_pty = null,
             .xtversion = null,
+            .query = null,
         };
     };
+
+    /// The kind of a query that expects a reply from the terminal, passed
+    /// to the `query` effect.
+    ///
+    /// One sequence is one query, also when the sequence asks several
+    /// questions (for example OSC 4 with several indexes): the terminal
+    /// then writes one reply that holds all answers.
+    ///
+    /// Some kinds have no answer in this library (`size_csi_11_t`,
+    /// `size_csi_13_t`, `size_csi_15_t`, `size_csi_19_t`, `size_csi_20_t`,
+    /// `clipboard_read` and `kitty_clipboard_read` without a reply, and
+    /// the others when the matching effect is not set). The effect is
+    /// called for them all, so an embedder can answer them itself.
+    ///
+    /// C: GhosttyTerminalQueryKind
+    pub const Query = lib.Enum(lib.target, &.{
+        // Never reported. This exists so that a zeroed C value is not
+        // mistaken for a real query.
+        "invalid",
+
+        // Device attributes: CSI c, CSI > c, CSI = c.
+        "device_attributes_primary",
+        "device_attributes_secondary",
+        "device_attributes_tertiary",
+
+        // Device status reports: CSI 5 n, CSI 6 n, CSI ? 996 n, CSI ? 998 n.
+        "operating_status",
+        "cursor_position",
+        "color_scheme",
+        "visibility",
+
+        // ENQ (0x05).
+        "enquiry",
+
+        // Kitty keyboard flags: CSI ? u.
+        "kitty_keyboard",
+
+        // DECRQM, for known and unknown modes: CSI Ps $ p, CSI ? Ps $ p.
+        "mode_report",
+
+        // XTVERSION: CSI > q.
+        "xtversion",
+
+        // XTWINOPS size and state queries.
+        "size_csi_14_t",
+        "size_csi_16_t",
+        "size_csi_18_t",
+        "size_csi_21_t",
+        "size_csi_11_t",
+        "size_csi_13_t",
+        "size_csi_15_t",
+        "size_csi_19_t",
+        "size_csi_20_t",
+
+        // DECRQSS and XTGETTCAP.
+        "decrqss",
+        "xtgettcap",
+
+        // OSC 4, 10, 11, 12 and similar color queries, and the kitty
+        // color protocol (OSC 21).
+        "osc_color",
+        "kitty_color",
+
+        // OSC 52 and OSC 5522 clipboard reads.
+        "clipboard_read",
+        "kitty_clipboard_read",
+    });
 
     /// A sequence this library does not implement, passed to the
     /// `unknown_sequence` callback. The data is only valid until the
@@ -470,6 +557,13 @@ pub const Handler = struct {
         return .{
             .terminal = terminal,
         };
+    }
+
+    /// Report one query to the embedder before the terminal answers it.
+    fn query(self: *Handler, kind: Query) void {
+        self.query_reported = true;
+        const func = self.effects.query orelse return;
+        func(self, kind);
     }
 
     pub fn deinit(self: *Handler) void {
@@ -745,18 +839,61 @@ pub const Handler = struct {
             // Effect-based handlers
             .bell => self.bell(),
             .show_desktop_notification => self.desktopNotification(value),
-            .device_attributes => self.reportDeviceAttributes(value),
-            .device_status => self.deviceStatus(value.request),
-            .enquiry => self.reportEnquiry(),
-            .kitty_keyboard_query => self.queryKittyKeyboard(),
-            .request_mode => self.requestMode(value.mode),
-            .request_mode_unknown => self.requestModeUnknown(value.mode, value.ansi),
-            .size_report => self.reportSize(value),
+            .device_attributes => {
+                self.query(switch (value) {
+                    .primary => .device_attributes_primary,
+                    .secondary => .device_attributes_secondary,
+                    .tertiary => .device_attributes_tertiary,
+                });
+                self.reportDeviceAttributes(value);
+            },
+            .device_status => {
+                self.query(switch (value.request) {
+                    .operating_status => .operating_status,
+                    .cursor_position => .cursor_position,
+                    .color_scheme => .color_scheme,
+                    .visibility => .visibility,
+                });
+                self.deviceStatus(value.request);
+            },
+            .enquiry => {
+                self.query(.enquiry);
+                self.reportEnquiry();
+            },
+            .kitty_keyboard_query => {
+                self.query(.kitty_keyboard);
+                self.queryKittyKeyboard();
+            },
+            .request_mode => {
+                self.query(.mode_report);
+                self.requestMode(value.mode);
+            },
+            .request_mode_unknown => {
+                self.query(.mode_report);
+                self.requestModeUnknown(value.mode, value.ansi);
+            },
+            .size_report => {
+                self.query(switch (value) {
+                    .csi_14_t => .size_csi_14_t,
+                    .csi_16_t => .size_csi_16_t,
+                    .csi_18_t => .size_csi_18_t,
+                    .csi_21_t => .size_csi_21_t,
+                    .csi_11_t => .size_csi_11_t,
+                    .csi_13_t => .size_csi_13_t,
+                    .csi_15_t => .size_csi_15_t,
+                    .csi_19_t => .size_csi_19_t,
+                    .csi_20_t => .size_csi_20_t,
+                });
+                self.reportSize(value);
+            },
             .window_title => try self.windowTitle(value.title),
             .report_pwd => try self.reportPwd(value.url),
             .progress_report => self.progressReport(value),
             .program_status => self.programStatus(value),
-            .xtversion => self.reportXtversion(),
+            .xtversion => {
+                self.query(.xtversion);
+                self.reportXtversion();
+            },
             .request_xt_checksum => self.reportXtChecksum(value),
             .clipboard_contents => self.clipboardContents(
                 value.kind,
@@ -814,6 +951,7 @@ pub const Handler = struct {
     fn dcsCommand(self: *Handler, cmd: *dcs.Command) !void {
         switch (cmd.*) {
             .decrqss => |request| {
+                self.query(.decrqss);
                 var response: [
                     dcs.Command.DECRQSS.max_response_bytes + 1
                 ]u8 = undefined;
@@ -826,6 +964,7 @@ pub const Handler = struct {
             },
 
             .xtgettcap => |*gettcap| {
+                self.query(.xtgettcap);
                 if (self.effects.write_pty == null) return;
                 const map = comptime terminfo.ghostty.xtgettcapMap();
                 while (gettcap.next()) |key| {
@@ -981,6 +1120,7 @@ pub const Handler = struct {
 
         // OSC 52 uses a "?" payload to request the clipboard contents.
         if (data.len == 1 and data[0] == '?') {
+            self.query(.clipboard_read);
             self.clipboardRead(location, terminator);
             return;
         }
@@ -1154,7 +1294,10 @@ pub const Handler = struct {
 
         const payload = v.payload orelse "";
         switch (meta.op) {
-            .read => try self.kittyClipboardRead(&meta, payload, v.terminator),
+            .read => {
+                self.query(.kitty_clipboard_read);
+                try self.kittyClipboardRead(&meta, payload, v.terminator);
+            },
             .write => try self.kittyClipboardWriteBegin(&meta, v.terminator),
             .wdata => try self.kittyClipboardData(&meta, payload, v.terminator),
             .walias => try self.kittyClipboardAlias(&meta, payload, v.terminator),
@@ -1777,6 +1920,10 @@ pub const Handler = struct {
 
         // Build the response.
         switch (style) {
+            // This library has no answer for these. The embedder saw the
+            // query through the `query` effect.
+            .csi_11_t, .csi_13_t, .csi_15_t, .csi_19_t, .csi_20_t => return,
+
             .csi_21_t => {
                 if (!self.title_report) return;
                 const title = self.terminal.getTitle() orelse "";
@@ -1790,7 +1937,7 @@ pub const Handler = struct {
                     .csi_14_t => .csi_14_t,
                     .csi_16_t => .csi_16_t,
                     .csi_18_t => .csi_18_t,
-                    .csi_21_t => unreachable,
+                    else => unreachable,
                 };
                 size_report.encode(
                     &aw.writer,
@@ -2031,6 +2178,9 @@ pub const Handler = struct {
         defer response.deinit();
         const writer = &response.writer;
 
+        // One sequence is one query, however many colors it asks for.
+        var queried = false;
+
         var it = requests.constIterator(0);
         while (it.next()) |req| {
             switch (req.*) {
@@ -2089,6 +2239,10 @@ pub const Handler = struct {
                 },
 
                 .query => |target| {
+                    if (!queried) {
+                        queried = true;
+                        self.query(.osc_color);
+                    }
                     if (self.effects.write_pty == null) continue;
                     const c = self.terminal.colorForXterm(target) orelse continue;
                     try writeXtermColorReport(writer, target, c, terminator);
@@ -2149,6 +2303,9 @@ pub const Handler = struct {
         defer response.deinit();
         const writer = &response.writer;
 
+        // One sequence is one query, however many keys it asks for.
+        var queried = false;
+
         for (request.list.items) |item| {
             switch (item) {
                 .set => |v| switch (v.key) {
@@ -2176,6 +2333,10 @@ pub const Handler = struct {
                     },
                 },
                 .query => |key| {
+                    if (!queried) {
+                        queried = true;
+                        self.query(.kitty_color);
+                    }
                     if (self.effects.write_pty == null) continue;
                     const c = self.terminal.colorForKitty(key) orelse {
                         if (!key.hasTerminalQueryColor()) continue;

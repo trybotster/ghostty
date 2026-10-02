@@ -228,6 +228,7 @@ const type_decls = [_]TypeDecl{
     .initStruct("GhosttyTerminalProgressReport", terminal.ProgressReport),
     .initStruct("GhosttyTerminalScrollbar", terminal.TerminalScrollbar),
     .initStruct("GhosttyTerminalSemanticPrompt", terminal.SemanticPrompt),
+    .initStruct("GhosttyTerminalQuery", terminal.Query),
     .initTaggedStruct("GhosttyTerminalScrollViewport", terminal.ScrollViewport, "tag", "value", .generated),
     .initUnion(
         "GhosttyTerminalScrollViewportValue",
@@ -328,6 +329,7 @@ const type_decls = [_]TypeDecl{
     .initEnum("GhosttyTerminalData", terminal.TerminalData, "GHOSTTY_TERMINAL_DATA_"),
     .initEnum("GhosttyTerminalOption", terminal.Option, "GHOSTTY_TERMINAL_OPT_"),
     .initEnum("GhosttyTerminalNotificationSource", terminal.NotificationSource, "GHOSTTY_TERMINAL_NOTIFICATION_SOURCE_"),
+    .initEnum("GhosttyTerminalQueryKind", terminal.QueryKind, "GHOSTTY_TERMINAL_QUERY_"),
     .initEnum("GhosttyTerminalProgressState", terminal.ProgressState, "GHOSTTY_TERMINAL_PROGRESS_STATE_"),
     .initEnum("GhosttyTerminalScreen", terminal.TerminalScreen, "GHOSTTY_TERMINAL_SCREEN_"),
     .initEnum("GhosttyTerminalScrollViewportTag", terminal.ZigTerminal.ScrollViewport.Tag, "GHOSTTY_SCROLL_VIEWPORT_"),
