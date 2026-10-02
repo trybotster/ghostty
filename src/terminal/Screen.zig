@@ -11301,7 +11301,7 @@ test "Screen: Botster OSC8 capacity pressure does not crash" {
         try s.startHyperlink(uri, null);
         s.endHyperlink();
         // Print a cell so page state advances like a real TUI.
-        try s.printString("x");
+        try s.testWriteString("x");
     }
 }
 
@@ -11324,7 +11324,7 @@ test "Screen: Botster unique truecolor style pressure does not crash" {
         const b: u8 = @truncate(i *% 47);
         try s.setAttribute(.{ .direct_color_fg = .{ .r = r, .g = g, .b = b } });
         try s.setAttribute(.{ .direct_color_bg = .{ .r = ~r, .g = ~g, .b = ~b } });
-        try s.printString("x");
+        try s.testWriteString("x");
     }
 }
 
