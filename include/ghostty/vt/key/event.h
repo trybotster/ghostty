@@ -90,6 +90,12 @@ typedef uint16_t GhosttyMods;
  */
 #define GHOSTTY_MODS_SUPER_SIDE (1 << 9)
 
+/** Hyper modifier (kitty keyboard protocol) */
+#define GHOSTTY_MODS_HYPER (1 << 10)
+
+/** Meta modifier (kitty keyboard protocol) */
+#define GHOSTTY_MODS_META (1 << 11)
+
 /**
  * Physical key codes.
  *
@@ -297,6 +303,16 @@ typedef enum GHOSTTY_ENUM_TYPED {
     GHOSTTY_KEY_COPY,
     GHOSTTY_KEY_CUT,
     GHOSTTY_KEY_PASTE,
+    GHOSTTY_KEY_F26,
+    GHOSTTY_KEY_F27,
+    GHOSTTY_KEY_F28,
+    GHOSTTY_KEY_F29,
+    GHOSTTY_KEY_F30,
+    GHOSTTY_KEY_F31,
+    GHOSTTY_KEY_F32,
+    GHOSTTY_KEY_F33,
+    GHOSTTY_KEY_F34,
+    GHOSTTY_KEY_F35,
     GHOSTTY_KEY_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyKey;
 
@@ -478,5 +494,55 @@ GHOSTTY_API void ghostty_key_event_set_unshifted_codepoint(GhosttyKeyEvent event
  * @ingroup key
  */
 GHOSTTY_API uint32_t ghostty_key_event_get_unshifted_codepoint(GhosttyKeyEvent event);
+
+/**
+ * Set the shifted key: the character that the key produces with Shift (kitty
+ * keyboard protocol alternate key, used with kitty flag 4).
+ *
+ * The encoder reports exactly this value and never derives it. Zero means
+ * that the caller did not supply it, and the encoding omits it. Event
+ * handles start with zero.
+ *
+ * @param event The key event handle, must not be NULL
+ * @param codepoint The shifted Unicode codepoint, or 0 for none
+ *
+ * @ingroup key
+ */
+GHOSTTY_API void ghostty_key_event_set_shifted_key(GhosttyKeyEvent event, uint32_t codepoint);
+
+/**
+ * Get the shifted key.
+ *
+ * @param event The key event handle, must not be NULL
+ * @return The shifted Unicode codepoint, or 0 when none was set
+ *
+ * @ingroup key
+ */
+GHOSTTY_API uint32_t ghostty_key_event_get_shifted_key(GhosttyKeyEvent event);
+
+/**
+ * Set the base layout key: the key's character on the standard PC layout
+ * (kitty keyboard protocol alternate key, used with kitty flag 4).
+ *
+ * The encoder reports exactly this value and never derives it. Zero means
+ * that the caller did not supply it, and the encoding omits it. Event
+ * handles start with zero.
+ *
+ * @param event The key event handle, must not be NULL
+ * @param codepoint The base layout Unicode codepoint, or 0 for none
+ *
+ * @ingroup key
+ */
+GHOSTTY_API void ghostty_key_event_set_base_layout_key(GhosttyKeyEvent event, uint32_t codepoint);
+
+/**
+ * Get the base layout key.
+ *
+ * @param event The key event handle, must not be NULL
+ * @return The base layout Unicode codepoint, or 0 when none was set
+ *
+ * @ingroup key
+ */
+GHOSTTY_API uint32_t ghostty_key_event_get_base_layout_key(GhosttyKeyEvent event);
 
 #endif /* GHOSTTY_VT_KEY_EVENT_H */

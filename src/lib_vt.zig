@@ -209,6 +209,10 @@ comptime {
             @export(&c.key_event_get_utf8, .{ .name = "ghostty_key_event_get_utf8" });
             @export(&c.key_event_set_unshifted_codepoint, .{ .name = "ghostty_key_event_set_unshifted_codepoint" });
             @export(&c.key_event_get_unshifted_codepoint, .{ .name = "ghostty_key_event_get_unshifted_codepoint" });
+            @export(&c.key_event_set_shifted_key, .{ .name = "ghostty_key_event_set_shifted_key" });
+            @export(&c.key_event_get_shifted_key, .{ .name = "ghostty_key_event_get_shifted_key" });
+            @export(&c.key_event_set_base_layout_key, .{ .name = "ghostty_key_event_set_base_layout_key" });
+            @export(&c.key_event_get_base_layout_key, .{ .name = "ghostty_key_event_get_base_layout_key" });
             @export(&c.key_encoder_new, .{ .name = "ghostty_key_encoder_new" });
             @export(&c.key_encoder_free, .{ .name = "ghostty_key_encoder_free" });
             @export(&c.key_encoder_setopt, .{ .name = "ghostty_key_encoder_setopt" });

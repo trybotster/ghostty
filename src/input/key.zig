@@ -47,6 +47,28 @@ pub const KeyEvent = struct {
     /// shift+a is "A" in UTF-8 but unshifted would provide 'a'.
     unshifted_codepoint: u21 = 0,
 
+    /// Where the kitty alternate keys (shifted key and base layout key)
+    /// come from. The default derives them from `utf8` and `key`. A caller
+    /// that supplies them (the C API) never has them derived.
+    alternates: Alternates = .derive,
+
+    pub const Alternates = union(enum) {
+        /// Derive the alternate keys from `utf8` and `key`.
+        derive,
+
+        /// Use exactly these codepoints. Zero means the caller did not
+        /// supply that alternate, and the encoding omits it.
+        provided: Provided,
+
+        pub const Provided = struct {
+            /// The character the key produces with Shift.
+            shifted: u21 = 0,
+
+            /// The key's character on the standard PC layout.
+            base_layout: u21 = 0,
+        };
+    };
+
     /// Returns the effective modifiers for this event. The effective
     /// modifiers are the mods that should be considered for keybindings.
     pub fn effectiveMods(self: KeyEvent) Mods {
@@ -305,6 +327,19 @@ pub const Key = enum(c_int) {
     cut,
     paste,
 
+    // Function keys 26 to 35 (kitty functional keys). They follow every
+    // earlier key so that the earlier keys keep their values.
+    f26,
+    f27,
+    f28,
+    f29,
+    f30,
+    f31,
+    f32,
+    f33,
+    f34,
+    f35,
+
     /// Converts an ASCII character to a key, if possible. This returns
     /// null if the character is unknown.
     ///
@@ -405,7 +440,7 @@ pub const Key = enum(c_int) {
         return switch (self) {
             inline else => |tag| {
                 return comptime result: {
-                    @setEvalBranchQuota(10_000);
+                    @setEvalBranchQuota(20_000);
                     for (codepoint_map) |entry| {
                         if (entry[1] == tag) break :result true;
                     }
@@ -528,7 +563,7 @@ pub const Key = enum(c_int) {
         return switch (self) {
             inline else => |tag| {
                 return comptime result: {
-                    @setEvalBranchQuota(10_000);
+                    @setEvalBranchQuota(20_000);
                     for (codepoint_map) |entry| {
                         if (entry[1] == tag) break :result entry[0];
                     }
@@ -681,6 +716,16 @@ pub const Key = enum(c_int) {
             .f23,
             .f24,
             .f25,
+            .f26,
+            .f27,
+            .f28,
+            .f29,
+            .f30,
+            .f31,
+            .f32,
+            .f33,
+            .f34,
+            .f35,
             .intl_backslash,
             .intl_ro,
             .intl_yen,
