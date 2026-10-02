@@ -219,6 +219,7 @@ comptime {
             @export(&c.focus_encode, .{ .name = "ghostty_focus_encode" });
             @export(&c.paste_is_safe, .{ .name = "ghostty_paste_is_safe" });
             @export(&c.paste_encode, .{ .name = "ghostty_paste_encode" });
+            @export(&c.paste_frame, .{ .name = "ghostty_paste_frame" });
             @export(&c.terminal_paste, .{ .name = "ghostty_terminal_paste" });
             @export(&c.mouse_event_new, .{ .name = "ghostty_mouse_event_new" });
             @export(&c.mouse_event_free, .{ .name = "ghostty_mouse_event_free" });
