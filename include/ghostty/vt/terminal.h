@@ -845,6 +845,24 @@ struct GhosttyClipboardWrite {
    * ST. Read it only when `size` covers it.
    */
   GhosttyOscTerminator terminator;
+
+  /**
+   * True when the write was larger than the terminal's own limit
+   * (GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES for OSC 5522). The
+   * terminal did not keep the data: `contents_len` is zero, and this does
+   * not request a clear. The reply answers it as for any other write.
+   * Read it only when `size` covers it.
+   */
+  bool too_large;
+
+  /**
+   * The byte length of the write. Without `too_large`, the sum of the data
+   * lengths of the contents. With `too_large`, the decoded size of the whole
+   * transaction: every decoded byte, including the data of a MIME type that
+   * a later chunk of the same type replaced (an alias adds nothing). Read
+   * it only when `size` covers it.
+   */
+  uint64_t total_len;
 };
 
 /**
@@ -2252,13 +2270,16 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * when a transaction begins; an in-flight transaction keeps the limit
    * it started with.
    *
-   * Data beyond the limit fails the whole transaction with EFBIG. The
-   * transaction is discarded, later write-related packets are ignored
-   * until a new write begins, and nothing reaches the clipboard write
-   * callback.
+   * Data beyond the limit does not fail the transaction. The terminal
+   * frees the data it buffered and only counts the decoded size of the
+   * rest. The commit still calls the clipboard write callback, with
+   * GhosttyClipboardWrite::too_large set, no contents, and the decoded size
+   * of the whole transaction in GhosttyClipboardWrite::total_len. The terminal sends no answer of
+   * its own (no EFBIG): the callback's reply is the only one, as for any
+   * other write.
    *
-   * Transactions are buffered in memory, so this limit bounds how much
-   * memory a single write can make the terminal allocate. Pass SIZE_MAX
+   * Transactions are buffered in memory up to this limit, so it bounds
+   * how much memory a single write can make the terminal allocate. Pass SIZE_MAX
    * to remove the limit. A NULL value pointer reverts to the built-in
    * default of 64MiB, the minimum required by the protocol.
    *
