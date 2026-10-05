@@ -48,6 +48,15 @@ pub const WriteState = struct {
     /// apply to a transaction already in flight.
     max_size: usize,
 
+    /// See Options.count_over_limit.
+    count_over_limit: bool,
+
+    /// Null while the data is within max_size. Once it went over with
+    /// count_over_limit set, the spool is freed and this counts every
+    /// decoded byte of the transaction, including the regions that a
+    /// later chunk of the same MIME type replaced.
+    over_limit_len: ?u64 = null,
+
     /// Index into entries currently receiving data.
     current: ?usize = null,
 
@@ -61,6 +70,14 @@ pub const WriteState = struct {
     pub const Options = struct {
         /// Maximum total decoded bytes accumulated by the transaction.
         max_size: usize = max_write_size,
+
+        /// When false, data past max_size fails the transaction with
+        /// error.TooLarge. When true, data past max_size does not fail
+        /// it: the transaction frees its buffered data and only decodes
+        /// later data to count it, and the commit reports the decoded
+        /// size of the whole transaction with no contents
+        /// (Committed.over_limit_len).
+        count_over_limit: bool = false,
     };
 
     const Entry = struct {
@@ -95,6 +112,7 @@ pub const WriteState = struct {
             .pw = pw,
             .name = name,
             .max_size = opts.max_size,
+            .count_over_limit = opts.count_over_limit,
         };
     }
 
@@ -109,9 +127,10 @@ pub const WriteState = struct {
     /// must be non-empty; an empty mime is a commit, not data).
     ///
     /// Returns error.TooLarge when the transaction exceeds max_size
-    /// and error.Invalid when the payload stream is not valid base64.
-    /// The caller must fail the whole transaction with EFBIG or EINVAL
-    /// respectively and abort it, as required by the protocol.
+    /// (only without Options.count_over_limit) and error.Invalid when
+    /// the payload stream is not valid base64. The caller must fail
+    /// the whole transaction with EFBIG or EINVAL respectively and
+    /// abort it, as required by the protocol.
     pub fn data(
         self: *WriteState,
         alloc: Allocator,
@@ -163,6 +182,8 @@ pub const WriteState = struct {
             self.current = self.entries.items.len - 1;
         }
 
+        if (self.over_limit_len != null) return self.count(payload);
+
         // The payloads for one MIME region concatenate into a single
         // strict base64 stream, decoded directly into the spool's
         // unused capacity. Invalid data aborts the transaction; per
@@ -178,8 +199,40 @@ pub const WriteState = struct {
         // over it aborts the entire write; partial clipboard contents
         // must never reach the embedder.
         const remaining = self.max_size -| self.spool.items.len;
-        if (decoded.len > remaining) return error.TooLarge;
+        if (decoded.len > remaining) {
+            if (!self.count_over_limit) return error.TooLarge;
+
+            // Stop buffering. Keep only the decoded size so far,
+            // including this chunk.
+            self.over_limit_len = self.spool.items.len + decoded.len;
+            self.spool.clearAndFree(alloc);
+            for (self.entries.items) |*entry| {
+                entry.start = 0;
+                entry.len = 0;
+            }
+            return;
+        }
         self.spool.items.len += decoded.len;
+    }
+
+    /// Decode a payload only to count it, once the transaction is over
+    /// its limit. The payload goes through the decoder in pieces with a
+    /// fixed buffer, so nothing is kept.
+    fn count(self: *WriteState, payload: []const u8) error{Invalid}!void {
+        var buf: [3 * 1024]u8 = undefined;
+        var rest = payload;
+        while (rest.len > 0) {
+            const piece = rest[0..@min(rest.len, 4 * 1024 - 4)];
+            rest = rest[piece.len..];
+            const decoded = self.decoder.feed(piece, &buf) catch
+                return error.Invalid;
+            self.over_limit_len.? +|= decoded.len;
+
+            // A piece that ends at terminal padding resets the decoder.
+            // Within one payload, padding must be the end of it.
+            if (rest.len > 0 and self.decoder.carry_len == 0 and
+                piece[piece.len - 1] == '=') return error.Invalid;
+        }
     }
 
     /// Finish the decode stream of the entry currently receiving
@@ -254,6 +307,13 @@ pub const WriteState = struct {
         name: []const u8,
         contents: []const Content,
 
+        /// Null when contents carry the write. Otherwise the write went
+        /// over the limit with Options.count_over_limit: contents is
+        /// empty, and this is the decoded size of the whole transaction
+        /// (every decoded byte, including replaced regions; aliases
+        /// carry no data).
+        over_limit_len: ?u64 = null,
+
         pub fn deinit(self: *const Committed, alloc: Allocator) void {
             alloc.free(self.contents);
         }
@@ -275,6 +335,16 @@ pub const WriteState = struct {
             entry.len = self.spool.items.len - entry.start;
             self.current = null;
         }
+
+        // Over the limit there is no data to deliver, only its size.
+        if (self.over_limit_len) |len| return .{
+            .loc = self.loc,
+            .id = self.id,
+            .pw = self.pw,
+            .name = self.name,
+            .contents = &.{},
+            .over_limit_len = len,
+        };
 
         // Resolve the final MIME map: entries in arrival order, then
         // aliases applied sequentially against the evolving map so
@@ -695,4 +765,120 @@ test "write: alias without data target is dropped" {
     const committed = try state.commit(alloc);
     defer committed.deinit(alloc);
     try testing.expectEqual(@as(usize, 0), committed.contents.len);
+}
+
+test "write: count over limit delivers data up to the limit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const begin_meta: Metadata = .{ .op = .write };
+    var state: WriteState = try .init(alloc, &begin_meta, .{
+        .max_size = 5,
+        .count_over_limit = true,
+    });
+    defer state.deinit(alloc);
+
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "SGVsbG8="); // "Hello"
+
+    const committed = try state.commit(alloc);
+    defer committed.deinit(alloc);
+    try testing.expect(committed.over_limit_len == null);
+    try testing.expectEqualStrings("Hello", committed.contents[0].data);
+}
+
+test "write: count over limit reports the decoded size without data" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const begin_meta: Metadata = .{ .op = .write, .id = "big" };
+    var state: WriteState = try .init(alloc, &begin_meta, .{
+        .max_size = 8,
+        .count_over_limit = true,
+    });
+    defer state.deinit(alloc);
+
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "SGVsbG8="); // "Hello"
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/html" }, "PGI+"); // "<b>"
+    try testing.expect(state.over_limit_len == null);
+
+    // "hi<" goes over the limit: the buffered data is freed.
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/html" }, "aGk8L2I"); // "hi<", carries "L2I"
+    try testing.expectEqual(@as(?u64, 11), state.over_limit_len);
+    try testing.expectEqual(@as(usize, 0), state.spool.capacity);
+
+    // Later data is counted at any split, and a chunk that replaces an
+    // earlier region of its MIME type adds its bytes: the size is every
+    // decoded byte of the transaction, not the final contents.
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/html" }, "+"); // "/b>"
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "Yw=="); // "c", replaces "Hello"
+    try state.data(alloc, &.{ .op = .wdata, .mime = "image/png" }, "iVBORw=="); // "\x89PNG"
+    try state.data(alloc, &.{ .op = .wdata, .mime = "image/png" }, "AA=="); // "\x00"
+    try testing.expectEqual(@as(usize, 0), state.spool.capacity);
+
+    // An alias carries no data of its own.
+    try state.alias(alloc, &.{ .op = .walias, .mime = "text/plain" }, "VEVYVA=="); // "TEXT"
+
+    const committed = try state.commit(alloc);
+    defer committed.deinit(alloc);
+    try testing.expectEqualStrings("big", committed.id);
+    try testing.expectEqual(@as(usize, 0), committed.contents.len);
+    // "Hello" 5 + "<b>hi</b>" 9 + "c" 1 + "\x89PNG\x00" 5. The final
+    // contents would be 1 + 9 + 5 + 1 (the alias) = 16.
+    try testing.expectEqual(@as(?u64, 20), committed.over_limit_len);
+}
+
+test "write: count over limit keeps base64 validation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Case = struct { payload: []const u8, at_commit: bool };
+    // A payload longer than one counting piece: its first piece ends at
+    // padding, which must end the payload.
+    const long_padded = "A" ** 4088 ++ "AA==" ++ "AAAA";
+    const cases = [_]Case{
+        .{ .payload = "Z29vZA==bW9yZQ==", .at_commit = false },
+        .{ .payload = "SGVs!!!bG8=", .at_commit = false },
+        .{ .payload = long_padded, .at_commit = false },
+        .{ .payload = "SGVsbG8", .at_commit = true },
+    };
+    for (cases) |case| {
+        const begin_meta: Metadata = .{ .op = .write };
+        var state: WriteState = try .init(alloc, &begin_meta, .{
+            .max_size = 1,
+            .count_over_limit = true,
+        });
+        defer state.deinit(alloc);
+        try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "SGk="); // "Hi"
+        try testing.expect(state.over_limit_len != null);
+        if (case.at_commit) {
+            try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, case.payload);
+            try testing.expectError(error.Invalid, state.commit(alloc));
+        } else {
+            try testing.expectError(error.Invalid, state.data(
+                alloc,
+                &.{ .op = .wdata, .mime = "text/plain" },
+                case.payload,
+            ));
+        }
+    }
+}
+
+test "write: count over limit counts a payload longer than one piece" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const begin_meta: Metadata = .{ .op = .write };
+    var state: WriteState = try .init(alloc, &begin_meta, .{
+        .max_size = 1,
+        .count_over_limit = true,
+    });
+    defer state.deinit(alloc);
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "SGk="); // "Hi"
+    // 3 * 4096 characters decode to 9216 bytes, unpadded.
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "AAAA" ** 3072);
+    try state.data(alloc, &.{ .op = .wdata, .mime = "text/plain" }, "YQ=="); // "a"
+
+    const committed = try state.commit(alloc);
+    defer committed.deinit(alloc);
+    try testing.expectEqual(@as(?u64, 2 + 9216 + 1), committed.over_limit_len);
 }

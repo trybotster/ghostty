@@ -92,6 +92,14 @@ pub const Write = struct {
     /// The terminator that the request used. The other protocols report ST.
     terminator: osc.Terminator = .st,
 
+    /// Null when contents carry the write. Otherwise the write was larger
+    /// than the terminal's own limit (an OSC 5522 transaction over
+    /// kitty_clipboard_write_max_bytes with counting enabled): contents
+    /// is empty and does not mean "clear", and this is the decoded size
+    /// of the whole transaction, including the regions that a later chunk
+    /// of the same MIME type replaced.
+    over_limit_len: ?u64 = null,
+
     /// Name of the writing program for permission prompts, if the
     /// protocol carries one. Empty otherwise.
     name: []const u8,

@@ -102,8 +102,16 @@ pub const Handler = struct {
     /// Maximum total decoded bytes accumulated by one Kitty clipboard
     /// protocol (OSC 5522) write transaction, captured when the
     /// transaction begins. Data beyond the limit fails the transaction
-    /// with EFBIG.
+    /// with EFBIG, unless kitty_clipboard_write_count_over_limit is set.
     kitty_clipboard_write_max_bytes: usize = kitty_clipboard.max_write_size,
+
+    /// When set, data beyond kitty_clipboard_write_max_bytes does not
+    /// fail the transaction. The terminal stops buffering, counts the
+    /// decoded size of the rest, and the commit still calls the
+    /// clipboard_write effect, with no contents and the decoded size of
+    /// the whole transaction in clipboard.Write.over_limit_len. The effect's reply is then the
+    /// only answer, as for any other write.
+    kitty_clipboard_write_count_over_limit: bool = false,
 
     /// Called for escape sequences this library does not implement, so you
     /// can implement them yourself. See `UnknownSequence` for the kinds of
@@ -1541,6 +1549,7 @@ pub const Handler = struct {
         errdefer alloc.destroy(state);
         state.* = try .init(alloc, meta, .{
             .max_size = self.kitty_clipboard_write_max_bytes,
+            .count_over_limit = self.kitty_clipboard_write_count_over_limit,
         });
         self.kitty_clipboard_write = state;
     }
@@ -1675,6 +1684,7 @@ pub const Handler = struct {
         func(self, .{
             .location = committed.loc,
             .contents = committed.contents,
+            .over_limit_len = committed.over_limit_len,
             .name = committed.name,
             .granted = granted,
             .can_remember = pw.len > 0,

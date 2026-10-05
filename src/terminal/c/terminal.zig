@@ -178,6 +178,12 @@ pub const ClipboardWrite = extern struct {
     selection: lib.String,
     /// The terminator of the request.
     terminator: osc.Terminator.C,
+    /// True when the write was larger than the terminal's own limit:
+    /// contents is then empty and does not mean "clear".
+    too_large: bool,
+    /// The sum of the data lengths of the contents. When too_large is
+    /// set, the decoded size of the whole write instead.
+    total_len: u64,
 };
 
 /// The reply to a clipboard write request.
@@ -567,6 +573,9 @@ const Effects = struct {
             };
         }
 
+        var total_len: u64 = 0;
+        for (write.contents) |content| total_len +|= content.data.len;
+
         const ctx: ClipboardWriteCtx = .{ .write = write };
         const request: ClipboardWrite = .{
             .size = @sizeOf(ClipboardWrite),
@@ -583,6 +592,8 @@ const Effects = struct {
                 .st => .st,
                 .bel => .bel,
             },
+            .too_large = write.over_limit_len != null,
+            .total_len = write.over_limit_len orelse total_len,
         };
         func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
@@ -949,6 +960,11 @@ fn wrap(
         .clipboard_read = null,
         .program_status = null,
     };
+
+    // An OSC 5522 write over the transaction limit still reaches the
+    // clipboard_write callback, with its length and no contents, and the
+    // callback's reply is its only answer.
+    handler.kitty_clipboard_write_count_over_limit = true;
 
     wrapper.* = .{
         .terminal = t,
@@ -6197,10 +6213,44 @@ test "set clipboard write max bytes" {
     ));
     defer free(t);
 
+    // The built-in default reads back.
+    var max: usize = 0;
+    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
+    try testing.expectEqual(@as(usize, kitty_clipboard.max_write_size), max);
+
+    const limit: usize = 4;
+    try testing.expectEqual(Result.success, set(t, .clipboard_write_max_bytes, @ptrCast(&limit)));
+    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
+    try testing.expectEqual(limit, max);
+
+    // A NULL value reverts to the built-in default.
+    try testing.expectEqual(Result.success, set(t, .clipboard_write_max_bytes, null));
+    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
+    try testing.expectEqual(@as(usize, kitty_clipboard.max_write_size), max);
+}
+
+test "clipboard write over the max bytes reaches the callback with its length" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer free(t);
+
     const S = struct {
         var responses: [512]u8 = undefined;
         var responses_len: usize = 0;
+        /// Bytes that the terminal wrote outside a reply call.
+        var unprompted_len: usize = 0;
+        var in_reply: bool = false;
         var write_count: usize = 0;
+        var last_too_large: bool = false;
+        var last_total_len: u64 = 0;
+        var last_contents_len: usize = 0;
+        var last_data: [16]u8 = undefined;
+        var last_data_len: usize = 0;
 
         fn writePty(
             _: Terminal,
@@ -6208,6 +6258,7 @@ test "set clipboard write max bytes" {
             ptr: [*]const u8,
             len: usize,
         ) callconv(lib.calling_conv) void {
+            if (!in_reply) unprompted_len += len;
             @memcpy(responses[responses_len..][0..len], ptr[0..len]);
             responses_len += len;
         }
@@ -6218,48 +6269,107 @@ test "set clipboard write max bytes" {
             request: *const ClipboardWrite,
         ) callconv(lib.calling_conv) void {
             write_count += 1;
+            last_too_large = request.too_large;
+            last_total_len = request.total_len;
+            last_contents_len = request.contents_len;
+            last_data_len = 0;
+            if (request.contents) |ptr| {
+                last_data_len = @min(ptr[0].data.len, last_data.len);
+                @memcpy(last_data[0..last_data_len], ptr[0].data.ptr[0..last_data_len]);
+            }
+
+            // Answer by size, as an embedder that bounds its own memory.
+            in_reply = true;
+            defer in_reply = false;
             request.reply(request, &.{
                 .size = @sizeOf(ClipboardWriteReply),
-                .result = .success,
+                .result = if (request.too_large) .io_error else .success,
                 .remember = false,
             });
         }
+
+        fn reset() void {
+            responses_len = 0;
+            unprompted_len = 0;
+            write_count = 0;
+            last_too_large = false;
+            last_total_len = 0;
+            last_contents_len = 0;
+            last_data_len = 0;
+        }
     };
-    S.responses_len = 0;
-    S.write_count = 0;
+    S.reset();
 
     try testing.expectEqual(Result.success, set(t, .write_pty, @ptrCast(&S.writePty)));
     try testing.expectEqual(Result.success, set(t, .clipboard_write, @ptrCast(&S.clipboardWrite)));
-
-    // The built-in default reads back.
-    var max: usize = 0;
-    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
-    try testing.expectEqual(@as(usize, kitty_clipboard.max_write_size), max);
-
-    // Set a tiny limit; an oversized text write fails with EFBIG and
-    // never reaches the callback.
-    const limit: usize = 4;
+    const limit: usize = 5;
     try testing.expectEqual(Result.success, set(t, .clipboard_write_max_bytes, @ptrCast(&limit)));
-    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
-    try testing.expectEqual(limit, max);
 
-    const seqs = [_][]const u8{
+    // At the limit: the contents are delivered, and the terminal writes
+    // only the reply's acknowledgement.
+    const at_limit = [_][]const u8{
         "\x1B]5522;type=write:id=c1\x1B\\",
-        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbA==\x1B\\", // "Hell"
-        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bw==\x1B\\", // "o"
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVs\x1B\\", // "Hel"
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bG8=\x1B\\", // "lo"
         "\x1B]5522;type=wdata\x1B\\",
     };
-    for (seqs) |seq| vt_write(t, seq.ptr, seq.len);
-    try testing.expectEqual(@as(usize, 0), S.write_count);
+    for (at_limit) |seq| vt_write(t, seq.ptr, seq.len);
+    try testing.expectEqual(@as(usize, 1), S.write_count);
+    try testing.expect(!S.last_too_large);
+    try testing.expectEqual(@as(u64, 5), S.last_total_len);
+    try testing.expectEqual(@as(usize, 1), S.last_contents_len);
+    try testing.expectEqualStrings("Hello", S.last_data[0..S.last_data_len]);
+    try testing.expectEqual(@as(usize, 0), S.unprompted_len);
     try testing.expectEqualStrings(
-        "\x1B]5522;type=write:status=EFBIG:id=c1\x1B\\",
+        "\x1B]5522;type=write:status=DONE:id=c1\x1B\\",
         S.responses[0..S.responses_len],
     );
 
-    // A NULL value reverts to the built-in default.
-    try testing.expectEqual(Result.success, set(t, .clipboard_write_max_bytes, null));
-    try testing.expectEqual(Result.success, get(t, .clipboard_write_max_bytes, @ptrCast(&max)));
-    try testing.expectEqual(@as(usize, kitty_clipboard.max_write_size), max);
+    // Over the limit: the callback still runs, with no contents and the
+    // decoded size of the whole transaction, counted past the limit and
+    // including the region that a later chunk of the same MIME type
+    // replaced. Here the final contents ("Hi" and "<b>", 5 bytes) would
+    // be at the limit; the decoded size is 11. The terminal sends no
+    // EFBIG; the reply's acknowledgement is the only answer.
+    S.reset();
+    const over_limit = [_][]const u8{
+        "\x1B]5522;type=write:id=c2\x1B\\",
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVs\x1B\\", // "Hel"
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bG8h\x1B\\", // "lo!"
+        "\x1B]5522;type=wdata:mime=dGV4dC9odG1s;PGI+\x1B\\", // "<b>"
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGk=\x1B\\", // "Hi", replaces "Hello!"
+        "\x1B]5522;type=wdata\x1B\\",
+    };
+    for (over_limit[0..3]) |seq| vt_write(t, seq.ptr, seq.len);
+    // Nothing is answered when the data goes over the limit.
+    try testing.expectEqual(@as(usize, 0), S.responses_len);
+    for (over_limit[3..]) |seq| vt_write(t, seq.ptr, seq.len);
+    try testing.expectEqual(@as(usize, 1), S.write_count);
+    try testing.expect(S.last_too_large);
+    try testing.expectEqual(@as(u64, 11), S.last_total_len);
+    try testing.expectEqual(@as(usize, 0), S.last_contents_len);
+    try testing.expectEqual(@as(usize, 0), S.unprompted_len);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EIO:id=c2\x1B\\",
+        S.responses[0..S.responses_len],
+    );
+
+    // The next transaction starts fresh, under the limit again.
+    S.reset();
+    const after = [_][]const u8{
+        "\x1B]5522;type=write:id=c3\x1B\\",
+        "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGk=\x1B\\", // "Hi"
+        "\x1B]5522;type=wdata\x1B\\",
+    };
+    for (after) |seq| vt_write(t, seq.ptr, seq.len);
+    try testing.expectEqual(@as(usize, 1), S.write_count);
+    try testing.expect(!S.last_too_large);
+    try testing.expectEqual(@as(u64, 2), S.last_total_len);
+    try testing.expectEqualStrings("Hi", S.last_data[0..S.last_data_len]);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=DONE:id=c3\x1B\\",
+        S.responses[0..S.responses_len],
+    );
 }
 
 test "set clipboard_read callback" {
