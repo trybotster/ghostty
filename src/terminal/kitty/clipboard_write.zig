@@ -882,3 +882,57 @@ test "write: count over limit counts a payload longer than one piece" {
     defer committed.deinit(alloc);
     try testing.expectEqual(@as(?u64, 2 + 9216 + 1), committed.over_limit_len);
 }
+
+/// Feed one wdata chunk for the MIME type named "m{n}".
+fn testChunk(state: *WriteState, n: usize, payload: []const u8) !void {
+    var buf: [8]u8 = undefined;
+    const mime = try std.fmt.bufPrint(&buf, "m{d}", .{n});
+    try state.data(std.testing.allocator, &.{ .op = .wdata, .mime = mime }, payload);
+}
+
+test "write: ignored MIME types do not make a write over the limit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // The kept types are exactly at the limit. The data of types past
+    // the type-count limit is never decoded, so it neither counts
+    // against the limit nor fails the write, valid or not.
+    const begin_meta: Metadata = .{ .op = .write };
+    var state: WriteState = try .init(alloc, &begin_meta, .{
+        .max_size = max_write_mimes,
+        .count_over_limit = true,
+    });
+    defer state.deinit(alloc);
+    for (0..max_write_mimes) |n| try testChunk(&state, n, "eA=="); // "x"
+    try testChunk(&state, max_write_mimes, "eHh4eHh4eHh4"); // "xxxxxxxxx"
+    try testChunk(&state, max_write_mimes + 1, "!!!!");
+
+    const committed = try state.commit(alloc);
+    defer committed.deinit(alloc);
+    try testing.expect(committed.over_limit_len == null);
+    try testing.expectEqual(@as(usize, max_write_mimes), committed.contents.len);
+    try testing.expectEqualStrings("x", committed.contents[0].data);
+}
+
+test "write: count over limit does not count ignored MIME types" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Over the limit, the size counts what the terminal decodes: the
+    // 64 kept types, not the ignored ones (before or after the limit).
+    const begin_meta: Metadata = .{ .op = .write };
+    var state: WriteState = try .init(alloc, &begin_meta, .{
+        .max_size = 1,
+        .count_over_limit = true,
+    });
+    defer state.deinit(alloc);
+    try testChunk(&state, 0, "eA==");
+    for (1..max_write_mimes) |n| try testChunk(&state, n, "eA==");
+    try testing.expect(state.over_limit_len != null);
+    try testChunk(&state, max_write_mimes, "eHh4"); // ignored "xxx"
+    try testChunk(&state, max_write_mimes + 1, "!!!!"); // ignored, invalid
+
+    const committed = try state.commit(alloc);
+    defer committed.deinit(alloc);
+    try testing.expectEqual(@as(?u64, max_write_mimes), committed.over_limit_len);
+}

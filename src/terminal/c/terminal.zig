@@ -6122,8 +6122,8 @@ test "clipboard write over the max bytes reaches the callback with its length" {
     // Over the limit: the callback still runs, with no contents and the
     // decoded size of the whole transaction, counted past the limit and
     // including the region that a later chunk of the same MIME type
-    // replaced. Here the final contents ("Hi" and "<b>", 5 bytes) would
-    // be at the limit; the decoded size is 11. The terminal sends no
+    // replaced; an alias adds nothing. Here the final contents ("Hi",
+    // "<b>" and the alias "Hi") would be 7 bytes; the decoded size is 11. The terminal sends no
     // EFBIG; the reply's acknowledgement is the only answer.
     S.reset();
     const over_limit = [_][]const u8{
@@ -6132,6 +6132,7 @@ test "clipboard write over the max bytes reaches the callback with its length" {
         "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bG8h\x1B\\", // "lo!"
         "\x1B]5522;type=wdata:mime=dGV4dC9odG1s;PGI+\x1B\\", // "<b>"
         "\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGk=\x1B\\", // "Hi", replaces "Hello!"
+        "\x1B]5522;type=walias:mime=dGV4dC9wbGFpbg==;VEVYVA==\x1B\\", // "TEXT" adds nothing
         "\x1B]5522;type=wdata\x1B\\",
     };
     for (over_limit[0..3]) |seq| vt_write(t, seq.ptr, seq.len);
